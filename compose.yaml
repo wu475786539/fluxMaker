@@ -1,0 +1,127 @@
+name: fluxmaker
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "${LOG_MAX_SIZE:-20m}"
+    max-file: "${LOG_MAX_FILES:-5}"
+
+services:
+  postgres:
+    logging: *default-logging
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: fluxmaker
+      POSTGRES_USER: fluxmaker
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fluxmaker -d fluxmaker"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    security_opt:
+      - no-new-privileges:true
+
+  redis:
+    logging: *default-logging
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+    security_opt:
+      - no-new-privileges:true
+
+  admin-api:
+    logging: *default-logging
+    build: .
+    image: fluxmaker:local
+    restart: unless-stopped
+    command: ["/usr/local/bin/admin-api"]
+    environment:
+      DATABASE_URL: postgres://fluxmaker:${POSTGRES_PASSWORD}@postgres:5432/fluxmaker?sslmode=disable
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      REDIS_DB: "0"
+      ADMIN_ADDR: :8080
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@fluxmaker.local}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
+      CREDENTIAL_MASTER_KEY: ${CREDENTIAL_MASTER_KEY:?set CREDENTIAL_MASTER_KEY in .env}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${ADMIN_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+
+  fluxmaker:
+    logging: *default-logging
+    image: fluxmaker:local
+    restart: unless-stopped
+    command: ["/usr/local/bin/fluxmaker"]
+    environment: &runtime_environment
+      DATABASE_URL: postgres://fluxmaker:${POSTGRES_PASSWORD}@postgres:5432/fluxmaker?sslmode=disable
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      REDIS_DB: "0"
+      FLUXMAKER_ENABLE_LIVE_TRADING: ${FLUXMAKER_ENABLE_LIVE_TRADING:-DISABLED}
+      CREDENTIAL_MASTER_KEY: ${CREDENTIAL_MASTER_KEY:?set CREDENTIAL_MASTER_KEY in .env}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - runtime_data:/var/lib/fluxmaker
+    depends_on:
+      admin-api:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+
+  watchdog:
+    logging: *default-logging
+    image: fluxmaker:local
+    restart: unless-stopped
+    command: ["/usr/local/bin/watchdog"]
+    environment: *runtime_environment
+    volumes:
+      - runtime_data:/var/lib/fluxmaker
+    depends_on:
+      admin-api:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  postgres_data:
+  redis_data:
+  runtime_data:

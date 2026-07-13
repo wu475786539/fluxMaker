@@ -1,0 +1,25 @@
+services:
+  integration-tests:
+    image: golang:1.25-alpine
+    working_dir: /src
+    command: ["go", "test", "-tags=integration", "-count=1", "-v", "./internal/integration"]
+    environment:
+      INTEGRATION_DATABASE_URL: postgres://fluxmaker:${POSTGRES_PASSWORD}@postgres:5432/fluxmaker?sslmode=disable
+      INTEGRATION_REDIS_ADDR: redis:6379
+      INTEGRATION_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      INTEGRATION_REDIS_DB: "15"
+      GOTOOLCHAIN: local
+    volumes:
+      - .:/src:ro
+      - integration_go_modules:/go/pkg/mod
+      - integration_go_build:/root/.cache/go-build
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  integration_go_modules:
+  integration_go_build:
+

@@ -1,0 +1,17 @@
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+*.local.json
+/configs/local.json
+/.claude/
+
+# Runtime and generated data
+/var/
+/bin/
+/backups/
+*.log
+coverage.out
+
+# macOS
+.DS_Store

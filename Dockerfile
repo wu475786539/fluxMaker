@@ -1,0 +1,23 @@
+FROM golang:1.25-alpine AS build
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/fluxmaker ./cmd/fluxmaker \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/watchdog ./cmd/watchdog \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/admin-api ./cmd/admin-api
+
+FROM alpine:3.22
+RUN apk add --no-cache ca-certificates tzdata \
+    && addgroup -S fluxmaker \
+    && adduser -S -G fluxmaker -h /var/lib/fluxmaker fluxmaker \
+    && mkdir -p /var/lib/fluxmaker/audit /var/lib/fluxmaker/run \
+    && chown -R fluxmaker:fluxmaker /var/lib/fluxmaker
+COPY --from=build /out/fluxmaker /usr/local/bin/fluxmaker
+COPY --from=build /out/watchdog /usr/local/bin/watchdog
+COPY --from=build /out/admin-api /usr/local/bin/admin-api
+USER fluxmaker
+WORKDIR /var/lib/fluxmaker
+CMD ["/usr/local/bin/fluxmaker"]
+

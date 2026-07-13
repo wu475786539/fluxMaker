@@ -1,0 +1,7 @@
+.git
+.env
+var
+bin
+configs
+*.local.json
+

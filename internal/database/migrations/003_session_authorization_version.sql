@@ -1,0 +1,3 @@
+ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS authorization_version BIGINT NOT NULL DEFAULT 1;
+
