@@ -6,21 +6,25 @@ import com.fluxmaker.math.DecimalValue;
 
 import java.math.BigInteger;
 import java.security.SecureRandom;
+import java.util.ArrayList;
+import java.util.List;
 
 public final class VolumeSimulationPlannerImpl implements VolumeSimulationPlanner {
     private static final SecureRandom RANDOM = new SecureRandom();
 
     @Override
-    public EventPlan plan(Request request) {
+    public List<EventPlan> plan(Request request) {
         AppConfig.TradeSimulationConfig config =
                 request.instrument().tradeSimulation;
 
         AppConfig.VenueMarketConfig market = request.market();
         Domain.Book book = request.book();
 
+        int batchSize = Math.max(1, config.batchSize);
+
         System.out.printf(
                 "[volume-simulation] planner entered instrument=%s source_venue=%s symbol=%s sequence=%d "
-                        + "bid=%s ask=%s price_tick=%s quantity_step=%s config_min_quantity=%s config_max_quantity=%s%n",
+                        + "bid=%s ask=%s price_tick=%s quantity_step=%s config_min_quantity=%s config_max_quantity=%s batch_size=%d%n",
                 request.instrument().id,
                 request.sourceVenue(),
                 market.symbol,
@@ -30,7 +34,8 @@ public final class VolumeSimulationPlannerImpl implements VolumeSimulationPlanne
                 market.priceTick,
                 market.quantityStep,
                 config.minQuantity,
-                config.maxQuantity
+                config.maxQuantity,
+                batchSize
         );
 
         DecimalValue priceTick = market.priceTick;
@@ -52,11 +57,6 @@ public final class VolumeSimulationPlannerImpl implements VolumeSimulationPlanne
                     "买一和卖一之间没有合法价格 Tick"
             );
         }
-        DecimalValue price = randomStep(
-                minimumPrice,
-                maximumPrice,
-                priceTick
-        );
 
         // 从配置的最小数量开始，并按照数量精度向上对齐。
         DecimalValue minimumQuantity =
@@ -72,7 +72,7 @@ public final class VolumeSimulationPlannerImpl implements VolumeSimulationPlanne
         // 满足市场最小金额。
         if (market.minNotional.isPositive()) {
             DecimalValue quantityForMinNotional = market.minNotional
-                    .divide(price)
+                    .divide(priceTick)
                     .quantizeUp(quantityStep);
 
             minimumQuantity = minimumQuantity.max(
@@ -95,26 +95,56 @@ public final class VolumeSimulationPlannerImpl implements VolumeSimulationPlanne
                     "配置的数量范围无法满足市场限制"
             );
         }
-        // 示例：根据序号交替生成买、卖方向。
-        Domain.Side side = request.sequence() % 2 == 0
-                ? Domain.Side.SELL
-                : Domain.Side.BUY;
 
-        System.out.printf(
-                "[volume-simulation] plan created instrument=%s sequence=%d side=%s bid=%s ask=%s price=%s quantity=%s%n",
-                request.instrument().id,
-                request.sequence(),
-                side,
-                book.bidPrice,
-                book.askPrice,
-                price,
-                minimumQuantity
-        );
-        return new EventPlan(
-                side,
-                price,
-                minimumQuantity
-        );
+        List<EventPlan> plans = new ArrayList<>(batchSize);
+        for (int i = 0; i < batchSize; i++) {
+            DecimalValue price = randomStep(
+                    minimumPrice,
+                    maximumPrice,
+                    priceTick
+            );
+
+            // 每笔独立计算满足最小金额的数量。
+            DecimalValue effectiveMinQuantity = minimumQuantity;
+            if (market.minNotional.isPositive()) {
+                DecimalValue quantityForMinNotional = market.minNotional
+                        .divide(price)
+                        .quantizeUp(quantityStep);
+                effectiveMinQuantity = effectiveMinQuantity.max(
+                        quantityForMinNotional
+                );
+            }
+
+            if (effectiveMinQuantity.compareTo(maximumQuantity) > 0) {
+                throw new IllegalArgumentException(
+                        "配置的数量范围无法满足市场限制（含最小金额）"
+                );
+            }
+
+            DecimalValue quantity = randomStep(
+                    effectiveMinQuantity,
+                    maximumQuantity,
+                    quantityStep
+            );
+
+            // 示例：根据序号交替生成买、卖方向。
+            Domain.Side side = (request.sequence() + i) % 2 == 0
+                    ? Domain.Side.SELL
+                    : Domain.Side.BUY;
+
+            System.out.printf(
+                    "[volume-simulation] plan created instrument=%s sequence=%d side=%s bid=%s ask=%s price=%s quantity=%s%n",
+                    request.instrument().id,
+                    request.sequence() + i,
+                    side,
+                    book.bidPrice,
+                    book.askPrice,
+                    price,
+                    quantity
+            );
+            plans.add(new EventPlan(side, price, quantity));
+        }
+        return plans;
     }
 
     private static DecimalValue randomStep(

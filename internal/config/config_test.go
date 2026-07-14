@@ -138,7 +138,7 @@ func TestTradeSimulationRequiresValidBoundSource(t *testing.T) {
 	cfg := minimalConfig()
 	cfg.Instruments[0].TradeSimulation = TradeSimulationConfig{
 		Enabled: true, SourceVenue: "binance", MinQuantity: num.Must("1"), MaxQuantity: num.Must("2"),
-		MinIntervalMS: 100, MaxIntervalMS: 200, BuyProbabilityBPS: 5000, RecentLimit: 50,
+		MinIntervalMS: 100, MaxIntervalMS: 200, BuyProbabilityBPS: 5000, RecentLimit: 50, BatchSize: 1,
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("valid simulation should pass: %v", err)

@@ -131,6 +131,7 @@ public final class AppConfig {
         public int maxIntervalMs;
         public int buyProbabilityBps;
         public int recentLimit;
+        public int batchSize = 1;
     }
 
     public static final class InstrumentConfig {
@@ -283,6 +284,7 @@ public final class AppConfig {
                 require(simulation.minIntervalMs >= 100 && simulation.maxIntervalMs >= simulation.minIntervalMs, "instrument " + instrument.id + ": trade simulation interval must be at least 100ms and max >= min");
                 require(simulation.buyProbabilityBps >= 0 && simulation.buyProbabilityBps <= 10_000, "instrument " + instrument.id + ": trade simulation buy probability must be 0..10000 bps");
                 require(simulation.recentLimit >= 1 && simulation.recentLimit <= 200, "instrument " + instrument.id + ": trade simulation recent limit must be 1..200");
+                require(simulation.batchSize >= 1 && simulation.batchSize <= 100, "instrument " + instrument.id + ": trade simulation batch size must be 1..100");
             }
         }
 

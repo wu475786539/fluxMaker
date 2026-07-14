@@ -15,9 +15,9 @@ import java.util.Objects;
 /**
  * Schedules and materializes internal volume-simulation events.
  *
- * <p>This boundary has no venue order client. A planner can only return an
- * {@link VolumeSimulationPlanner.EventPlan}; this class always creates a
- * {@link Domain.Fill} with {@code simulated=true}.
+ * <p>This boundary has no venue order client. A planner can only return
+ * {@link VolumeSimulationPlanner.EventPlan} lists; this class always creates
+ * {@link Domain.Fill} instances with {@code simulated=true}.
  */
 public final class TradeSimulator {
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -42,7 +42,7 @@ public final class TradeSimulator {
         public String error;
     }
 
-    public record Observation(Snapshot snapshot, Domain.Fill fill) {}
+    public record Observation(Snapshot snapshot, List<Domain.Fill> fills) {}
 
     public TradeSimulator() {
         this(new InsideSpreadRandomPlanner());
@@ -66,7 +66,7 @@ public final class TradeSimulator {
         snapshot.planner = planner.getClass().getSimpleName();
         snapshot.status = "disabled";
         if (!config.enabled || !venueName.equals(config.sourceVenue)) {
-            return new Observation(snapshot, null);
+            return new Observation(snapshot, List.of());
         }
 
         State state = states.computeIfAbsent(instrument.id, ignored -> new State());
@@ -74,20 +74,28 @@ public final class TradeSimulator {
             state.nextAt = now.plusMillis(randomDuration(config.minIntervalMs, config.maxIntervalMs));
         }
         snapshot.status = "waiting";
-        Domain.Fill generated = null;
+        List<Domain.Fill> generated = List.of();
         if (!now.isBefore(state.nextAt)) {
             state.nextAt = now.plusMillis(randomDuration(config.minIntervalMs, config.maxIntervalMs));
             try {
-                long sequence = state.sequence + 1;
+                long baseSequence = state.sequence;
                 VolumeSimulationPlanner.Request request = new VolumeSimulationPlanner.Request(
-                        instrument, venueName, market, book, now, sequence);
-                generated = materialize(instrument, venueName, market, book, now, sequence, planner.plan(request));
-                state.sequence = sequence;
+                        instrument, venueName, market, book, now, baseSequence + 1);
+                List<VolumeSimulationPlanner.EventPlan> plans = planner.plan(request);
+                List<Domain.Fill> fills = new ArrayList<>(plans.size());
+                for (int i = 0; i < plans.size(); i++) {
+                    long seq = baseSequence + 1 + i;
+                    fills.add(materialize(instrument, venueName, market, book, now, seq, plans.get(i)));
+                }
+                state.sequence = baseSequence + plans.size();
                 state.lastGeneratedAt = now;
-                state.fills.addFirst(generated);
+                for (int i = fills.size() - 1; i >= 0; i--) {
+                    state.fills.addFirst(fills.get(i));
+                }
                 if (state.fills.size() > config.recentLimit) {
                     state.fills = new ArrayList<>(state.fills.subList(0, config.recentLimit));
                 }
+                generated = fills;
                 snapshot.status = "running";
             } catch (RuntimeException e) {
                 snapshot.status = "skipped";
