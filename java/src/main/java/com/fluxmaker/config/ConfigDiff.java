@@ -101,7 +101,7 @@ public final class ConfigDiff {
             if (!equal(old.base, current.base) || !equal(old.quote, current.quote)) add.add(id, "reconfigure", "Token 信息发生变化");
             if (!equal(old.reference, current.reference)) add.add(id, "reconfigure", "Pancake 价格路径发生变化");
             if (!equal(old.strategy, current.strategy)) add.add(id, "reconcile", "策略或库存参数发生变化");
-            if (!equal(old.tradeSimulation, current.tradeSimulation)) add.add(id, "hot_reload", "内部成交模拟参数发生变化");
+            if (!equal(old.tradeSimulation, current.tradeSimulation)) add.add(id, "hot_reload", "内部成交量仿真参数发生变化");
         }
         newInstruments.keySet().stream().filter(id -> !oldInstruments.containsKey(id)).forEach(id -> add.add(id, "add", "新增币对"));
         diffVenues(plan, previous, next, add);

@@ -4,7 +4,7 @@ FluxMaker 是一个使用 PancakeSwap V2 参考价格、同时支持 Binance Spo
 
 系统只用于真实双边流动性、库存管理和外部成交，不实现自成交、关联账户互相成交、刷量或价格操纵。
 
-币对可启用“成交模拟（内部）”：它只读取交易所买一卖一，在合法 Tick 内生成带 `simulated=true` 的本地事件，不向交易所提交订单、不进入真实成交统计。模拟事件与真实成交分栏展示，并写入独立 Redis Stream，供 UI 或内部联调程序消费。
+币对可启用“成交量仿真（内部）”：它只读取交易所买一卖一，在合法 Tick 内生成带 `simulated=true` 的本地事件，不向交易所提交订单、不写入交易所成交量、不进入真实成交统计。仿真事件与真实成交分栏展示，并写入独立 Redis Stream，供 UI 或内部联调、压测程序消费。
 
 ## 服务组成
 
@@ -99,7 +99,7 @@ http://服务器地址:8080
 
 后台按实际运营流程组织：
 
-- “币对管理”使用列表和详情页，详情分为基础信息、链上参考价、交易市场、策略与风控、成交模拟（内部）。
+- “币对管理”使用列表和详情页，详情分为基础信息、链上参考价、交易市场、策略与风控、成交量仿真（内部）。
 - “交易所”只维护平台级连接；币对映射统一在币对详情的“交易市场”中维护。
 - “交易所凭证”维护真实交易账号；币对选择凭证时只读取名称、类型和启用状态。
 - 草稿允许分步骤、不完整保存；只有点击“校验并发布”时才执行完整安全校验。
@@ -137,7 +137,8 @@ http://服务器地址:8080
 - 币对暂停后仍按正常轮询周期只读刷新指数价、交易所盘口、余额、实际挂单、成交和连接状态，不会把暂停前的锁仓余额或待确认订单长期显示为实时数据，也不会执行任何挂撤单写操作。
 - PancakeSwap V2 路径只需填写 Pair 地址；后台通过已保存的 BNB Chain RPC 读取 `token0()`、`token1()` 和 `factory()`，再根据币对基础币或上一跳输出自动生成 Base/Quote Token。两跳路径必须连续，并最终到达币对的报价币合约。
 - Pancake V2 TWAP 首次达到窗口后会在下一窗口形成前继续复用最近一次有效 TWAP，避免出现“就绪一轮、暖机一轮”的交替状态；每个完整窗口仍会滚动更新累计价格基线。
-- 内部成交模拟从指定交易市场读取盘口，按价格 Tick 在 `bid < price < ask` 中随机选价，按数量 Step、最小数量和最小金额生成随机数量；没有合法内部 Tick 时跳过本轮。随机方向使用配置的买方向概率，默认 5000 bps。
+- 内部成交量仿真从指定市场读取公开盘口，默认规划器按价格 Tick 在 `bid < price < ask` 中随机选价，按数量 Step、最小数量和最小金额生成数量；没有合法内部 Tick 时跳过本轮。随机方向使用配置的买方向概率，默认 5000 bps。
+- Java 仿真逻辑通过 `VolumeSimulationPlanner` 扩展；规划器只能接收配置和只读市场快照，返回方向、价格、数量。框架统一校验价差/Tick/Step 并强制生成 `SIM-*` ID 和 `simulated=true`，扩展层不持有交易所下单客户端。
 
 ## 配置和缓存规则
 
@@ -160,7 +161,7 @@ OMS恢复状态 → Redis fluxmaker:oms:state:{credential_market_key}（7 天 TT
 租约围栏代次 → Redis fluxmaker:lease:generation:{credential_market_key}（单调递增，不随租约释放重置）
 交易规则变更 → Redis fluxmaker:runtime:rule-changes（最近 100 条，24 小时 TTL）
 暂停控制 → Redis fluxmaker:control:paused（持续保存，直到显式恢复）
-内部模拟成交 → Redis Stream fluxmaker:simulation:fills:{instrument_id}（约 1000 条）
+内部仿真事件 → Redis Stream fluxmaker:simulation:fills:{instrument_id}（约 1000 条）
 ```
 
 草稿不会影响交易；只有发布快照才会被执行。
@@ -195,7 +196,7 @@ trading_enabled = false
 FLUXMAKER_ENABLE_LIVE_TRADING = DISABLED
 ```
 
-Binance Spot Testnet 联调：在“交易所”把运行环境选择为“测试网”，后台会自动使用 `https://testnet.binance.vision`。绑定从 Spot Testnet 创建的 API Key，保持 STP 为 `EXPIRE_BOTH`。若要验证真实测试网铺单，再将系统切到 Live 并开启服务器的 Live 二次开关；内部成交模拟本身在 Shadow 模式即可运行，且永远不会调用下单接口。
+Binance Spot Testnet 联调：在“交易所”把运行环境选择为“测试网”，后台会自动使用 `https://testnet.binance.vision`。绑定从 Spot Testnet 创建的 API Key，保持 STP 为 `EXPIRE_BOTH`。若要验证真实测试网铺单，再将系统切到 Live 并开启服务器的 Live 二次开关；内部成交量仿真本身在 Shadow 模式即可运行，且永远不会调用下单接口。
 
 MGBX 测试网只填写其官方提供的 HTTPS Base URL 和测试网凭证；项目不会猜测或内置未经官方确认的测试地址。
 

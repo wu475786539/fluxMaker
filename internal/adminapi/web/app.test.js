@@ -92,6 +92,39 @@ test("strategy page renders progressive quote refresh controls and defaults", ()
   assert.match(html, /10～20 USDT/);
 });
 
+test("volume simulation page is explicitly internal-only and renders extension controls", () => {
+  vm.runInContext(`
+    state.user = { permissions: ["strategy:edit", "config:edit"] };
+    state.draft = { venues: {
+      binance: { enabled: true, markets: { btc_usdt: {} } },
+    } };
+    state.runtime = { instruments: [] };
+  `, context);
+  const html = context.tradeSimulationTab({
+    id: "btc_usdt",
+    base: { symbol: "BTC" },
+    quote: { symbol: "USDT" },
+    trade_simulation: {
+      enabled: true,
+      source_venue: "binance",
+      min_quantity: "1",
+      max_quantity: "2",
+      min_interval_ms: 1000,
+      max_interval_ms: 3000,
+      buy_probability_bps: 5000,
+      recent_limit: 50,
+    },
+  }, 0);
+
+  assert.match(html, /成交量仿真与压测/);
+  assert.match(html, /不会调用 <code>PlaceOrder<\/code>、<code>CancelOrder<\/code>/);
+  assert.match(html, /不会写入交易所成交量/);
+  assert.match(html, /data-path="instruments\.0\.trade_simulation\.min_quantity"[^>]*value="1"/);
+  assert.match(html, /data-path="instruments\.0\.trade_simulation\.max_interval_ms"[^>]*value="3000"/);
+  assert.match(html, /算法扩展点/);
+  assert.doesNotMatch(html, /测试网真实下单/);
+});
+
 test("runtime book labels distinguish empty and one-sided maker bootstrap", () => {
   assert.deepEqual(
     JSON.parse(JSON.stringify(context.bookDisplayState({ bid_price: "0", ask_price: "0" }))),

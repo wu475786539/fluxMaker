@@ -438,7 +438,7 @@ function pairPage() {
   const pair = selectedPair();
   if (!pair) return emptyState("币对不存在", "它可能已被删除或超出你的数据权限。", "返回币对列表", "back-pairs");
   const issues = pairIssues(pair);
-  const tabs = [["basic", "基础信息"], ["oracle", "链上参考价"], ["markets", "交易市场"], ["strategy", "策略与风控"], ["simulation", "成交模拟（内部）"]];
+  const tabs = [["basic", "基础信息"], ["oracle", "链上参考价"], ["markets", "交易市场"], ["strategy", "策略与风控"], ["simulation", "成交量仿真（内部）"]];
   if (has("runtime:view")) tabs.push(["runtime", "运行状态"]);
   return `
     <button class="back-link" data-action="back-pairs">← 返回币对列表</button>
@@ -556,8 +556,8 @@ function fillsTable(fills) {
 }
 
 function simulatedFillsTable(fills) {
-  if (!fills.length) return `<div class="mini-empty">等待第一笔内部模拟成交</div>`;
-  return `<div class="table-wrap"><table class="runtime-table"><thead><tr><th>时间</th><th>随机方向</th><th>价差内价格</th><th>数量</th><th>标识</th></tr></thead><tbody>${fills.slice(0, 50).map((fill) => `<tr><td>${formatDate(fill.timestamp)}</td><td class="${fill.side === "BUY" ? "buy-text" : "sell-text"}">${esc(fill.side)}</td><td>${esc(fill.price)}</td><td>${esc(fill.quantity)}</td><td>SIMULATED</td></tr>`).join("")}</tbody></table></div>`;
+  if (!fills.length) return `<div class="mini-empty">等待第一条内部仿真事件</div>`;
+  return `<div class="table-wrap"><table class="runtime-table"><thead><tr><th>时间</th><th>方向</th><th>价差内价格</th><th>仿真数量</th><th>标识</th></tr></thead><tbody>${fills.slice(0, 50).map((fill) => `<tr><td>${formatDate(fill.timestamp)}</td><td class="${fill.side === "BUY" ? "buy-text" : "sell-text"}">${esc(fill.side)}</td><td>${esc(fill.price)}</td><td>${esc(fill.quantity)}</td><td>SIMULATED</td></tr>`).join("")}</tbody></table></div>`;
 }
 
 function basicTab(pair, index) {
@@ -734,22 +734,22 @@ function tradeSimulationTab(pair, index) {
   const snapshot = runtimeSnapshot(pair.id)?.trade_simulation;
   return `<div class="content-grid">
     <section class="panel form-panel span-2">
-      <div class="section-heading"><span>05</span><div><h2>成交模拟（仅内部数据）</h2><p>读取所选交易所买一卖一，在价差内部生成带随机方向和数量的模拟成交；不会调用任何交易所下单接口。</p></div></div>
-      <div class="inline-note warning">模拟成交与交易所真实成交严格分开，带 <code>simulated=true</code> 标记，并写入独立 Redis Stream。测试网真实下单仍由铺单引擎负责且必须启用 STP。</div>
+      <div class="section-heading"><span>05</span><div><h2>成交量仿真与压测</h2><p>只读取所选交易所的公开买一卖一与精度，生成可供页面、Redis 和下游程序消费的内部事件。</p></div></div>
+      <div class="inline-note warning">所有结果只用于内部仿真/压测，带 <code>simulated=true</code> 标记并写入独立 Redis Stream。不会调用 <code>PlaceOrder</code>、<code>CancelOrder</code> 或批量下单接口，也不会写入交易所成交量。</div>
       <div class="form-grid">
-        ${boundCheck("启用内部成交模拟", `${path}.enabled`, Boolean(cfg.enabled), editable)}
-        <div class="field"><label>盘口来源交易所</label><select data-path="${path}.source_venue" data-type="text" ${editable ? "" : "disabled"}>${venueNames.length ? venueNames.map((name) => `<option value="${esc(name)}" ${name === source ? "selected" : ""}>${esc(name)}</option>`).join("") : `<option value="">请先绑定交易市场</option>`}</select><small>只读取盘口和精度，不使用该账户下单。</small></div>
-        ${boundField("最小数量", `${path}.min_quantity`, cfg.min_quantity ?? "1", "text", editable)}
-        ${boundField("最大数量", `${path}.max_quantity`, cfg.max_quantity ?? "10", "text", editable)}
-        ${boundedNumberField("最短间隔（ms）", `${path}.min_interval_ms`, cfg.min_interval_ms ?? 1000, editable, 100, 3600000, "至少 100ms")}
-        ${boundedNumberField("最长间隔（ms）", `${path}.max_interval_ms`, cfg.max_interval_ms ?? 3000, editable, 100, 3600000, "每笔生成后重新随机")}
+        ${boundCheck("启用内部成交量仿真", `${path}.enabled`, Boolean(cfg.enabled), editable)}
+        <div class="field"><label>市场数据来源</label><select data-path="${path}.source_venue" data-type="text" ${editable ? "" : "disabled"}>${venueNames.length ? venueNames.map((name) => `<option value="${esc(name)}" ${name === source ? "selected" : ""}>${esc(name)}</option>`).join("") : `<option value="">请先绑定交易市场</option>`}</select><small>只读取公开盘口和精度，不传入账户凭证或下单客户端。</small></div>
+        ${boundField("单事件最小数量", `${path}.min_quantity`, cfg.min_quantity ?? "1", "text", editable)}
+        ${boundField("单事件最大数量", `${path}.max_quantity`, cfg.max_quantity ?? "10", "text", editable)}
+        ${boundedNumberField("事件最短间隔（ms）", `${path}.min_interval_ms`, cfg.min_interval_ms ?? 1000, editable, 100, 3600000, "至少 100ms")}
+        ${boundedNumberField("事件最长间隔（ms）", `${path}.max_interval_ms`, cfg.max_interval_ms ?? 3000, editable, 100, 3600000, "每条事件后重新随机")}
         ${boundedNumberField("买方向概率（bps）", `${path}.buy_probability_bps`, cfg.buy_probability_bps ?? 5000, editable, 0, 10000, "5000 表示买卖方向各 50%")}
-        ${boundedNumberField("页面保留笔数", `${path}.recent_limit`, cfg.recent_limit ?? 50, editable, 1, 200, "Redis Stream 独立保留最近约 1000 条")}
+        ${boundedNumberField("页面保留事件数", `${path}.recent_limit`, cfg.recent_limit ?? 50, editable, 1, 200, "Redis Stream 独立保留最近约 1000 条")}
       </div>
     </section>
-    <aside class="panel guidance"><span class="guide-icon">SIM</span><h3>运行约束</h3><p>价格严格大于买一并小于卖一，再按交易所价格 Tick 对齐；数量按 Step、最小数量和最小金额校验。</p><code>bid &lt; 模拟价 &lt; ask</code><code>不会 PlaceOrder</code><p>如果价差中没有一个合法 Tick，本轮显示 skipped 并等待下一次盘口。</p></aside>
+    <aside class="panel guidance"><span class="guide-icon">SIM</span><h3>算法扩展点</h3><p>Java 规划器只接收配置、时间和只读市场快照，输出方向、价格、数量三个字段。框架统一补齐 SIM ID 与内部标记。</p><code>bid &lt; 仿真价 &lt; ask</code><code>simulated = true</code><p>默认算法按 Tick/Step 在价差内随机生成；你可以只替换规划器实现自己的压测逻辑。</p></aside>
     <section class="panel span-2">
-      <div class="panel-head"><div><h2>近期内部模拟成交</h2><p>${snapshot?.enabled ? `状态 ${esc(snapshot.status || "waiting")} · 来源 ${esc(snapshot.source_venue || source)}` : "尚未启用"}</p></div></div>
+      <div class="panel-head"><div><h2>近期内部仿真事件</h2><p>${snapshot?.enabled ? `状态 ${esc(snapshot.status || "waiting")} · 数据源 ${esc(snapshot.source_venue || source)} · 规划器 ${esc(snapshot.planner || "InsideSpreadRandomPlanner")}` : "尚未启用"}</p></div></div>
       ${snapshot?.error ? `<div class="runtime-error">${esc(snapshot.error)}</div>` : ""}
       ${simulatedFillsTable(snapshot?.fills || [])}
     </section>
@@ -1111,7 +1111,7 @@ function navigateValidationIssue(index) {
   if (pair) {
     state.selectedPairId = pair.id;
     state.page = "pair";
-    state.pairTab = /暖机|TWAP|价格路径|第\s*\d+\s*跳/.test(issue) ? "oracle" : /市场|凭证|精度/.test(issue) ? "markets" : /档|点差|数量|库存|资金|余额/.test(issue) ? "strategy" : "basic";
+    state.pairTab = /暖机|TWAP|价格路径|第\s*\d+\s*跳/.test(issue) ? "oracle" : /市场|凭证|精度/.test(issue) ? "markets" : /成交量仿真/.test(issue) ? "simulation" : /档|点差|数量|库存|资金|余额/.test(issue) ? "strategy" : "basic";
     return render();
   }
   return navigate("venues");
@@ -1636,11 +1636,11 @@ function pairIssues(pair) {
   });
   const simulation = pair.trade_simulation || {};
   if (simulation.enabled) {
-    if (!enabledMarkets.some((item) => item.name === simulation.source_venue)) issues.push("成交模拟需要选择已启用且已绑定的盘口来源交易所");
-    if (!(Number(simulation.min_quantity) > 0) || Number(simulation.max_quantity) < Number(simulation.min_quantity)) issues.push("成交模拟数量范围无效");
-    if (!(Number(simulation.min_interval_ms) >= 100) || Number(simulation.max_interval_ms) < Number(simulation.min_interval_ms)) issues.push("成交模拟间隔必须至少 100ms，且最长不能小于最短");
-    if (!(Number(simulation.buy_probability_bps) >= 0 && Number(simulation.buy_probability_bps) <= 10000)) issues.push("成交模拟买方向概率必须为 0–10000 bps");
-    if (!(Number(simulation.recent_limit) >= 1 && Number(simulation.recent_limit) <= 200)) issues.push("成交模拟页面保留笔数必须为 1–200");
+    if (!enabledMarkets.some((item) => item.name === simulation.source_venue)) issues.push("成交量仿真需要选择已启用且已绑定的市场数据来源");
+    if (!(Number(simulation.min_quantity) > 0) || Number(simulation.max_quantity) < Number(simulation.min_quantity)) issues.push("成交量仿真的单事件数量范围无效");
+    if (!(Number(simulation.min_interval_ms) >= 100) || Number(simulation.max_interval_ms) < Number(simulation.min_interval_ms)) issues.push("成交量仿真间隔必须至少 100ms，且最长不能小于最短");
+    if (!(Number(simulation.buy_probability_bps) >= 0 && Number(simulation.buy_probability_bps) <= 10000)) issues.push("成交量仿真买方向概率必须为 0–10000 bps");
+    if (!(Number(simulation.recent_limit) >= 1 && Number(simulation.recent_limit) <= 200)) issues.push("成交量仿真页面保留事件数必须为 1–200");
   }
   return [...new Set(issues)];
 }

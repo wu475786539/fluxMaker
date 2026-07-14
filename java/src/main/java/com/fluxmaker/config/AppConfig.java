@@ -121,6 +121,7 @@ public final class AppConfig {
         }
     }
 
+    /** Backward-compatible JSON model for the internal-only volume simulation page. */
     public static final class TradeSimulationConfig {
         public boolean enabled;
         public String sourceVenue = "";

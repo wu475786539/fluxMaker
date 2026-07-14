@@ -11,6 +11,7 @@ import com.fluxmaker.risk.RiskEngine;
 import com.fluxmaker.runtime.RuntimeStore;
 import com.fluxmaker.strategy.QuoteGenerator;
 import com.fluxmaker.tradesim.TradeSimulator;
+import com.fluxmaker.tradesim.VolumeSimulationPlannerImpl;
 import com.fluxmaker.venue.VenueClient;
 
 import java.security.SecureRandom;
@@ -46,7 +47,8 @@ public final class TradingEngine {
     private final QuoteGenerator strategy = new QuoteGenerator();
     private final RiskEngine risk = new RiskEngine();
     private final FaultManager faults;
-    private final TradeSimulator simulator = new TradeSimulator();
+    private final TradeSimulator simulator =
+            new TradeSimulator(new VolumeSimulationPlannerImpl());
     private final String ownerId;
     private final Map<String, Long> heldLeases = new ConcurrentHashMap<>();
     private final Map<String, RuntimeStore.PauseState> paused = new ConcurrentHashMap<>();
