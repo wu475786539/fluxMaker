@@ -701,17 +701,18 @@ function strategyTab(pair, index) {
         ${boundedNumberField("交易所盘口最大点差（bps）", `${path}.max_venue_spread_bps`, strategy.max_venue_spread_bps ?? 0, editable, 0, 10000, "0 使用运行时安全默认值 1000 bps")}
       </div>
       ${legacyOrderSize ? `<div class="inline-note warning">当前配置仍使用旧版固定数量：每档 ${esc(strategy.order_size)} ${esc(pair.base?.symbol || "Base Token")}。填写上面的最小和最大金额后，才会切换为按 ${esc(quoteSymbol)} 金额自动换算数量。</div>` : `<div class="inline-note">每个买卖档位会在金额范围内生成稳定随机值，再按该档价格和交易所数量精度自动换算，不需要手工计算 Token 数量。交易所最小下单金额高于这里的最小值时，以交易所规则为准。</div>`}
-      <div class="section-heading compact-heading"><span>↻</span><div><h2>盘口渐进轮换</h2><p>指数价格不变时，只轮换少量到期档位；真实行情移动仍按重新报价阈值优先处理。</p></div></div>
+      <div class="section-heading compact-heading"><span>↻</span><div><h2>盘口渐进轮换</h2><p>指数价格不变时，只轮换少量到期档位；真实行情移动仍按重新报价阈值优先处理。</p></div>${editable ? `<button class="btn small danger rotation-preset" type="button" data-action="apply-aggressive-rotation">5 秒活跃轮换</button>` : ""}</div>
       <div class="form-grid">
-        ${boundedNumberField("轮换间隔（秒）", `${path}.quote_refresh_seconds`, strategy.quote_refresh_seconds ?? 45, editable, 10, 86400, "建议 45 秒；同一时间窗口内目标保持稳定")}
+        ${boundedNumberField("轮换间隔（秒）", `${path}.quote_refresh_seconds`, strategy.quote_refresh_seconds ?? 45, editable, 5, 86400, "最低 5 秒；同一时间窗口内目标保持稳定")}
         ${boundedNumberField("每轮轮换比例（bps）", `${path}.quote_refresh_ratio_bps`, strategy.quote_refresh_ratio_bps ?? 1000, editable, 1, 10000, "1000 表示每轮只处理约 10% 当前目标订单")}
         ${boundedNumberField("最短挂单存活（秒）", `${path}.min_order_lifetime_seconds`, strategy.min_order_lifetime_seconds ?? 30, editable, 5, 86400, "新挂订单在此时间内不会因常规轮换再次撤掉")}
         ${boundedNumberField("最长挂单存活（秒）", `${path}.max_order_lifetime_seconds`, strategy.max_order_lifetime_seconds ?? 300, editable, 10, 604800, "超过后按最老优先、分批轮换")}
         ${boundedNumberField("价格扰动（Tick）", `${path}.price_jitter_ticks`, strategy.price_jitter_ticks ?? 2, editable, 1, 100, "只在原策略价格附近变化，并继续受 Post-Only 与价格偏差保护")}
         ${boundedNumberField("最优档数量", `${path}.best_levels`, strategy.best_levels ?? Math.min(3, levels), editable, 1, Math.max(1, levels), "买卖两侧最靠近盘口的档位数量")}
-        ${boundedNumberField("最优档轮换间隔（秒）", `${path}.best_level_refresh_seconds`, strategy.best_level_refresh_seconds ?? 90, editable, 10, 86400, "不能短于普通轮换间隔，避免频繁丢失最优价排队位置")}
+        ${boundedNumberField("最优档轮换间隔（秒）", `${path}.best_level_refresh_seconds`, strategy.best_level_refresh_seconds ?? 90, editable, 5, 86400, "不能短于普通轮换间隔；5 秒模式会频繁丢失排队位置")}
       </div>
       <div class="inline-note">系统只让到期档位进入撤挂队列，并优先保留其他深度。数量会在 ${esc(strategy.min_order_notional ?? 10)}～${esc(strategy.max_order_notional ?? 20)} ${esc(quoteSymbol)} 内重新生成，价格最多扰动 ${esc(strategy.price_jitter_ticks ?? 2)} 个 Tick；不会因为轮换一次撤空全部盘口。</div>
+      ${strategy.quote_refresh_seconds === 5 ? `<div class="inline-note warning">当前为高频活跃轮换：每 5 秒更新目标，撤单与重挂可能分属相邻引擎轮次，会显著增加交易所写接口调用。</div>` : ""}
     </section>
     <aside class="panel guidance"><span class="guide-icon">↕</span><h3>报价说明</h3><p>半点差决定第一档距离指数价的位置；后续档位按档位间距向外展开。</p><code>买一 = 指数价 − 半点差</code><code>卖一 = 指数价 ＋ 半点差</code><code>数量 = 随机${esc(quoteSymbol)}金额 ÷ 该档价格</code><code>最外档距离 = ${esc(outermostSpread)} bps</code><p>同一档位的随机目标金额保持稳定，避免行情轮询导致无意义撤挂。每个市场目标 ${ordersPerMarket} 张订单；当前 ${enabledMarketCount} 个已启用市场合计 ${totalTargetOrders} 张。订单按每轮最多 20 张滚动撤挂，避免限频和整片盘口瞬间消失。</p></aside>
     <section class="panel form-panel span-2">
@@ -1062,6 +1063,32 @@ function selectedPair() {
   return state.draft.instruments.find((pair) => pair.id === state.selectedPairId);
 }
 
+function applyAggressiveRotationPreset(config, pair) {
+  if (!config || !pair?.strategy) return false;
+  const levels = Math.max(1, Number(pair.strategy.levels) || 1);
+  const pollInterval = Number(config.poll_interval_ms);
+  if (!Number.isFinite(pollInterval) || pollInterval <= 0 || pollInterval > 5000) config.poll_interval_ms = 5000;
+  Object.assign(pair.strategy, {
+    quote_refresh_seconds: 5,
+    quote_refresh_ratio_bps: 1500,
+    min_order_lifetime_seconds: 5,
+    max_order_lifetime_seconds: 30,
+    price_jitter_ticks: 20,
+    best_levels: Math.min(3, levels),
+    best_level_refresh_seconds: 5,
+  });
+  return true;
+}
+
+function applyAggressiveRotation() {
+  const pair = selectedPair();
+  if (!applyAggressiveRotationPreset(state.draft, pair)) return;
+  state.ui.validationIssues = [];
+  state.dirty = true;
+  render();
+  toast("已填入 5 秒活跃轮换参数，保存后生效");
+}
+
 function pairIndex(id) {
   return state.draft.instruments.findIndex((pair) => pair.id === id);
 }
@@ -1153,6 +1180,7 @@ function handleAction(action, button) {
   if (action === "add-leg") return addLeg();
   if (action === "remove-leg") return removeLeg(Number(button.dataset.leg));
   if (action === "inspect-pair") return inspectPair(Number(button.dataset.leg));
+  if (action === "apply-aggressive-rotation") return applyAggressiveRotation();
   if (action === "toggle-add-market") { state.ui.addMarket = !state.ui.addMarket; return render(); }
   if (action === "toggle-create-venue") { state.ui.createVenue = !state.ui.createVenue; return render(); }
   if (action === "toggle-create-credential") { state.ui.createCredential = !state.ui.createCredential; state.ui.editCredentialId = null; return render(); }
@@ -1618,7 +1646,7 @@ function pairIssues(pair) {
   const jitterTicks = Number(pair.strategy?.price_jitter_ticks ?? 2);
   const bestLevels = Number(pair.strategy?.best_levels ?? Math.min(3, levels));
   const bestRefreshSeconds = Number(pair.strategy?.best_level_refresh_seconds ?? 90);
-  if (!(Number.isInteger(refreshSeconds) && refreshSeconds >= 10)) issues.push("盘口轮换间隔不能小于 10 秒");
+  if (!(Number.isInteger(refreshSeconds) && refreshSeconds >= 5)) issues.push("盘口轮换间隔不能小于 5 秒");
   if (!(Number.isInteger(refreshRatio) && refreshRatio >= 1 && refreshRatio <= 10000)) issues.push("每轮轮换比例必须为 1–10000 bps");
   if (!(Number.isInteger(minLifetime) && minLifetime >= 5)) issues.push("最短挂单存活不能小于 5 秒");
   if (!(Number.isInteger(maxLifetime) && maxLifetime >= minLifetime)) issues.push("最长挂单存活不能小于最短挂单存活");

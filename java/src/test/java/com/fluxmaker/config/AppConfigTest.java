@@ -52,8 +52,10 @@ class AppConfigTest {
     void validatesQuoteRefreshConfiguration() {
         AppConfig config = minimal();
         config.normalizeStrategySizing();
-        config.instruments.getFirst().strategy.quoteRefreshSeconds = 9;
+        config.instruments.getFirst().strategy.quoteRefreshSeconds = 4;
         assertThrows(IllegalArgumentException.class, config::validate);
+        config.instruments.getFirst().strategy.quoteRefreshSeconds = 5;
+        assertDoesNotThrow(config::validate);
         config.instruments.getFirst().strategy.quoteRefreshSeconds = 45;
         config.instruments.getFirst().strategy.maxOrderLifetimeSeconds = 20;
         config.instruments.getFirst().strategy.minOrderLifetimeSeconds = 30;

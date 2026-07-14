@@ -89,7 +89,29 @@ test("strategy page renders progressive quote refresh controls and defaults", ()
   assert.match(html, /data-path="instruments\.0\.strategy\.price_jitter_ticks"[^>]*value="2"/);
   assert.match(html, /data-path="instruments\.0\.strategy\.best_levels"[^>]*value="3"/);
   assert.match(html, /data-path="instruments\.0\.strategy\.best_level_refresh_seconds"[^>]*value="90"/);
+  assert.match(html, /data-path="instruments\.0\.strategy\.quote_refresh_seconds"[^>]*min="5"/);
+  assert.match(html, /5 秒活跃轮换/);
   assert.match(html, /10～20 USDT/);
+});
+
+test("aggressive rotation preset makes the selected pair visibly rotate every five seconds", () => {
+  const config = { poll_interval_ms: 8000 };
+  const pair = { strategy: { levels: 20, reprice_threshold_bps: 10 } };
+
+  context.applyAggressiveRotationPreset(config, pair);
+
+  assert.equal(config.poll_interval_ms, 5000);
+  assert.deepEqual(JSON.parse(JSON.stringify(pair.strategy)), {
+    levels: 20,
+    reprice_threshold_bps: 10,
+    quote_refresh_seconds: 5,
+    quote_refresh_ratio_bps: 1500,
+    min_order_lifetime_seconds: 5,
+    max_order_lifetime_seconds: 30,
+    price_jitter_ticks: 20,
+    best_levels: 3,
+    best_level_refresh_seconds: 5,
+  });
 });
 
 test("volume simulation page is explicitly internal-only and renders extension controls", () => {

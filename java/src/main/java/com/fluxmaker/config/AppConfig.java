@@ -263,7 +263,7 @@ public final class AppConfig {
                 require(strategy.maxOrderNotional.compareTo(strategy.minOrderNotional) >= 0, "instrument " + instrument.id + ": maximum order notional must be greater than or equal to minimum order notional");
             } else require(strategy.orderSize.isPositive(), "instrument " + instrument.id + ": order notional range or legacy order size is required");
             require(strategy.halfSpreadBps >= 0 && strategy.levelSpacingBps >= 0 && strategy.repriceThresholdBps >= 0, "instrument " + instrument.id + ": spread, spacing and reprice threshold must not be negative");
-            require(strategy.quoteRefreshSeconds >= 0 && (strategy.quoteRefreshSeconds == 0 || strategy.quoteRefreshSeconds >= 10), "instrument " + instrument.id + ": quote refresh interval must be zero or at least 10 seconds");
+            require(strategy.quoteRefreshSeconds >= 0 && (strategy.quoteRefreshSeconds == 0 || strategy.quoteRefreshSeconds >= 5), "instrument " + instrument.id + ": quote refresh interval must be zero or at least 5 seconds");
             require(strategy.quoteRefreshRatioBps >= 0 && strategy.quoteRefreshRatioBps <= 10_000, "instrument " + instrument.id + ": quote refresh ratio must be 0..10000 bps");
             require(strategy.minOrderLifetimeSeconds >= 0 && (strategy.minOrderLifetimeSeconds == 0 || strategy.minOrderLifetimeSeconds >= 5), "instrument " + instrument.id + ": minimum order lifetime must be zero or at least 5 seconds");
             require(strategy.maxOrderLifetimeSeconds >= 0 && (strategy.maxOrderLifetimeSeconds == 0 || strategy.maxOrderLifetimeSeconds >= 10), "instrument " + instrument.id + ": maximum order lifetime must be zero or at least 10 seconds");

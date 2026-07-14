@@ -66,6 +66,30 @@ class QuoteGeneratorTest {
         }
     }
 
+    @Test void aggressiveBestLevelsAdvanceEveryFiveSeconds() {
+        AppConfig.InstrumentConfig instrument = rangedInstrument(6);
+        instrument.strategy.quoteRefreshSeconds = 5;
+        instrument.strategy.quoteRefreshRatioBps = 1500;
+        instrument.strategy.priceJitterTicks = 20;
+        instrument.strategy.bestLevels = 3;
+        instrument.strategy.bestLevelRefreshSeconds = 5;
+        Instant start = Instant.ofEpochSecond(100);
+        QuoteGenerator generator = new QuoteGenerator();
+
+        List<Domain.Quote> first = generator.generateAt(instrument, "mgbx", market(), reference(), new Domain.Book(), DecimalValue.ZERO, start);
+        List<Domain.Quote> stable = generator.generateAt(instrument, "mgbx", market(), reference(), new Domain.Book(), DecimalValue.ZERO, start.plusSeconds(4));
+        List<Domain.Quote> rotated = generator.generateAt(instrument, "mgbx", market(), reference(), new Domain.Book(), DecimalValue.ZERO, start.plusSeconds(5));
+
+        for (int index = 0; index < 6; index++) {
+            assertEquals(first.get(index).price, stable.get(index).price);
+            assertEquals(first.get(index).quantity, stable.get(index).quantity);
+            boolean changed = !first.get(index).price.equals(rotated.get(index).price)
+                    || !first.get(index).quantity.equals(rotated.get(index).quantity);
+            assertTrue(changed, "best three bid/ask levels should rotate at the five-second boundary");
+        }
+        assertEquals(2, instrument.strategy.refreshOrdersPerCycle(10));
+    }
+
     @Test void capsPriceJitterByRepriceThreshold() {
         assertEquals(0, QuoteGenerator.boundedJitterTicks(DecimalValue.parse("1"), DecimalValue.parse("0.1"), 3, 10));
         assertEquals(3, QuoteGenerator.boundedJitterTicks(DecimalValue.parse("100"), DecimalValue.parse("0.01"), 3, 10));
