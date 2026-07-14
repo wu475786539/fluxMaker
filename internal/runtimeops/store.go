@@ -195,6 +195,13 @@ end
 return 0`, []string{marketLeasePrefix + key}, expected).Err()
 }
 
+// Pause reasons distinguish a soft close (stop quoting but leave resting orders
+// on the book) from an emergency stop (also cancel every managed order).
+const (
+	ReasonManualPause     = "manual_pause"
+	ReasonEmergencyCancel = "emergency_cancel"
+)
+
 type PauseState struct {
 	InstrumentID string    `json:"instrument_id"`
 	Paused       bool      `json:"paused"`

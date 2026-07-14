@@ -197,3 +197,33 @@ func TestAuditRotationValidation(t *testing.T) {
 		t.Fatal("expected undersized audit rotation to fail")
 	}
 }
+
+func TestNormalizeStrategyAddsQuoteRefreshDefaults(t *testing.T) {
+	cfg := minimalConfig()
+	cfg.NormalizeStrategySizing()
+	strategy := cfg.Instruments[0].Strategy
+	if strategy.QuoteRefreshSeconds != DefaultQuoteRefreshSeconds || strategy.QuoteRefreshRatioBPS != DefaultQuoteRefreshRatioBPS {
+		t.Fatalf("refresh defaults=%+v", strategy)
+	}
+	if strategy.MinOrderLifetimeSeconds != DefaultMinOrderLifetimeSeconds || strategy.MaxOrderLifetimeSeconds != DefaultMaxOrderLifetimeSeconds {
+		t.Fatalf("lifetime defaults=%+v", strategy)
+	}
+	if strategy.PriceJitterTicks != DefaultPriceJitterTicks || strategy.BestLevelRefreshSeconds != DefaultBestRefreshSeconds {
+		t.Fatalf("jitter/best defaults=%+v", strategy)
+	}
+}
+
+func TestQuoteRefreshValidation(t *testing.T) {
+	cfg := minimalConfig()
+	cfg.NormalizeStrategySizing()
+	cfg.Instruments[0].Strategy.QuoteRefreshSeconds = 9
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected too-fast quote refresh to fail")
+	}
+	cfg.Instruments[0].Strategy.QuoteRefreshSeconds = 45
+	cfg.Instruments[0].Strategy.MaxOrderLifetimeSeconds = 20
+	cfg.Instruments[0].Strategy.MinOrderLifetimeSeconds = 30
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected maximum lifetime below minimum to fail")
+	}
+}

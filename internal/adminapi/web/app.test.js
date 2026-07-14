@@ -65,6 +65,42 @@ test("legacy fixed quantity remains valid until a notional range is configured",
   assert.match(context.strategyOrderSizingIssue({}), /最小和最大金额/);
 });
 
+test("strategy page renders progressive quote refresh controls and defaults", () => {
+  vm.runInContext(`
+    state.user = { permissions: ["strategy:edit", "config:edit"] };
+    state.draft = { venues: {} };
+  `, context);
+  const html = context.strategyTab({
+    id: "btc_usdt",
+    base: { symbol: "BTC" },
+    quote: { symbol: "USDT" },
+    strategy: {
+      levels: 20,
+      min_order_notional: "10",
+      max_order_notional: "20",
+    },
+  }, 0);
+
+  assert.match(html, /盘口渐进轮换/);
+  assert.match(html, /data-path="instruments\.0\.strategy\.quote_refresh_seconds"[^>]*value="45"/);
+  assert.match(html, /data-path="instruments\.0\.strategy\.quote_refresh_ratio_bps"[^>]*value="1000"/);
+  assert.match(html, /data-path="instruments\.0\.strategy\.min_order_lifetime_seconds"[^>]*value="30"/);
+  assert.match(html, /data-path="instruments\.0\.strategy\.max_order_lifetime_seconds"[^>]*value="300"/);
+  assert.match(html, /data-path="instruments\.0\.strategy\.price_jitter_ticks"[^>]*value="2"/);
+  assert.match(html, /data-path="instruments\.0\.strategy\.best_levels"[^>]*value="3"/);
+  assert.match(html, /data-path="instruments\.0\.strategy\.best_level_refresh_seconds"[^>]*value="90"/);
+  assert.match(html, /10～20 USDT/);
+});
+
+test("runtime book labels distinguish empty and one-sided maker bootstrap", () => {
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(context.bookDisplayState({ bid_price: "0", ask_price: "0" }))),
+    { hasBid: false, hasAsk: false, twoSided: false, label: "空盘口 · 按指数价铺单" },
+  );
+  assert.equal(context.bookDisplayState({ bid_price: "1", ask_price: "0" }).label, "单边盘口 · 按指数价补单");
+  assert.equal(context.bookDisplayState(null).label, "盘口接口不可用 · 按指数价铺单");
+});
+
 function order(id, side, price) {
   return { order_id: id, side, price, quantity: "1", executed_qty: "0", state: "NEW" };
 }

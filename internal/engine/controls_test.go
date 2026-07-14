@@ -20,6 +20,7 @@ import (
 )
 
 type controlStore struct {
+	mu        sync.Mutex
 	paused    map[string]runtimeops.PauseState
 	published []runtimeops.InstrumentSnapshot
 }
@@ -102,6 +103,8 @@ func (s *leaseControlStore) ReleaseMarketLease(_ context.Context, key, owner str
 }
 
 func (s *controlStore) Publish(_ context.Context, snapshot runtimeops.InstrumentSnapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.published = append(s.published, snapshot)
 	return nil
 }
@@ -117,6 +120,8 @@ func (s *controlStore) Paused(context.Context) (map[string]runtimeops.PauseState
 type controlVenue struct {
 	orders         []domain.Order
 	balances       []domain.Balance
+	book           *domain.Book
+	bookErr        error
 	canceled       []string
 	placed         int
 	openOrderCalls int
@@ -134,6 +139,12 @@ func (v *ruleControlVenue) MarketRules(context.Context, string) (domain.MarketRu
 
 func (v *controlVenue) Name() string { return "binance" }
 func (v *controlVenue) TopBook(context.Context, string) (domain.Book, error) {
+	if v.bookErr != nil {
+		return domain.Book{}, v.bookErr
+	}
+	if v.book != nil {
+		return *v.book, nil
+	}
 	return domain.Book{BidPrice: num.Must("0.9"), AskPrice: num.Must("1.1"), Timestamp: time.Now()}, nil
 }
 func (v *controlVenue) Balances(context.Context) ([]domain.Balance, error) {
@@ -204,6 +215,51 @@ func TestPrepareHasNoOrderSideEffects(t *testing.T) {
 	}
 	if len(client.canceled) != 0 || client.placed != 0 {
 		t.Fatalf("candidate preflight changed orders: canceled=%v placed=%d", client.canceled, client.placed)
+	}
+}
+
+func TestPrepareDoesNotRequireVenueBookForReferenceMaker(t *testing.T) {
+	for _, client := range []*controlVenue{
+		{book: &domain.Book{}},
+		{bookErr: errors.New("public depth unavailable")},
+	} {
+		cfg := config.Config{
+			Mode:        domain.ModeShadow,
+			Instruments: []config.InstrumentConfig{{ID: "gdt_usdt", Strategy: config.StrategyConfig{HalfSpreadBPS: 50, Levels: 1, OrderSize: num.Must("10")}}},
+			Venues: map[string]config.VenueConfig{"mgbx": {
+				Type: "mgbx", Enabled: true, Markets: map[string]config.VenueMarketConfig{"gdt_usdt": {Symbol: "GDT_USDT", PriceTick: num.Must("0.01"), QuantityStep: num.Must("1"), MinNotional: num.Must("1")}},
+			}},
+		}
+		e := New(cfg, prepareOracle{}, map[string]venue.Client{venue.ClientKey("mgbx", "gdt_usdt"): client}, audit.New(""), nil, slog.Default())
+		if err := e.Prepare(context.Background()); err != nil {
+			t.Fatalf("book=%+v bookErr=%v prepare=%v", client.book, client.bookErr, err)
+		}
+	}
+}
+
+func TestRunOnceBuildsQuotePlanWhenVenueBookIsEmptyOrUnavailable(t *testing.T) {
+	for _, client := range []*controlVenue{
+		{book: &domain.Book{}},
+		{bookErr: errors.New("public depth unavailable")},
+	} {
+		store := &controlStore{}
+		cfg := config.Config{
+			Mode:        domain.ModeShadow,
+			Instruments: []config.InstrumentConfig{{ID: "gdt_usdt", Strategy: config.StrategyConfig{HalfSpreadBPS: 50, Levels: 2, OrderSize: num.Must("10")}}},
+			Venues: map[string]config.VenueConfig{"mgbx": {
+				Type: "mgbx", Enabled: true, Markets: map[string]config.VenueMarketConfig{"gdt_usdt": {Symbol: "GDT_USDT", PriceTick: num.Must("0.01"), QuantityStep: num.Must("1"), MinNotional: num.Must("1")}},
+			}},
+		}
+		e := New(cfg, prepareOracle{}, map[string]venue.Client{venue.ClientKey("mgbx", "gdt_usdt"): client}, audit.New(""), store, slog.Default())
+		if err := e.Prepare(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.RunOnce(context.Background()); err != nil {
+			t.Fatalf("book=%+v bookErr=%v run=%v", client.book, client.bookErr, err)
+		}
+		if len(store.published) == 0 || store.published[len(store.published)-1].Status != "running" {
+			t.Fatalf("snapshots=%+v", store.published)
+		}
 	}
 }
 
@@ -492,8 +548,8 @@ func TestPauseCancelsManagedOrdersOnceAndResumeClearsLocalState(t *testing.T) {
 	}
 }
 
-func TestPauseWaitsForExchangeCancellationConfirmation(t *testing.T) {
-	store := &controlStore{paused: map[string]runtimeops.PauseState{"token_usdt": {InstrumentID: "token_usdt", Paused: true, Reason: "manual_pause"}}}
+func TestEmergencyCancelWaitsForExchangeCancellationConfirmation(t *testing.T) {
+	store := &controlStore{paused: map[string]runtimeops.PauseState{"token_usdt": {InstrumentID: "token_usdt", Paused: true, Reason: "emergency_cancel"}}}
 	client := &controlVenue{retainCanceled: true, orders: []domain.Order{{OrderID: "managed", ClientID: "fm-123", Symbol: "TOKENUSDT"}}}
 	cfg := config.Config{Mode: domain.ModeLive, Instruments: []config.InstrumentConfig{{ID: "token_usdt"}}, Venues: map[string]config.VenueConfig{"binance": {Type: "binance", Enabled: true, TradingEnabled: true, Markets: map[string]config.VenueMarketConfig{"token_usdt": {Symbol: "TOKENUSDT"}}}}}
 	e := New(cfg, nil, map[string]venue.Client{venue.ClientKey("binance", "token_usdt"): client}, audit.New(""), store, slog.Default())
@@ -502,7 +558,7 @@ func TestPauseWaitsForExchangeCancellationConfirmation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(store.published) != 1 || store.published[0].Paused || store.published[0].Status != "pausing" || len(store.published[0].Venues) != 0 {
-		t.Fatalf("pause was acknowledged before exchange confirmation: %+v", store.published)
+		t.Fatalf("emergency pause was acknowledged before exchange confirmation: %+v", store.published)
 	}
 	client.orders = nil
 	if err := e.ApplyControls(context.Background()); err != nil {
@@ -511,6 +567,30 @@ func TestPauseWaitsForExchangeCancellationConfirmation(t *testing.T) {
 	latest := store.published[len(store.published)-1]
 	if !latest.Paused || latest.Status != "paused" {
 		t.Fatalf("confirmed cancellation did not acknowledge pause: %+v", latest)
+	}
+}
+
+// TestManualCloseStopsQuotingWithoutCanceling locks in the soft-close semantics:
+// a manual "关闭币对" stops quoting immediately and leaves resting orders on the
+// book — no cancellation is attempted, so it also works when the venue is down.
+func TestManualCloseStopsQuotingWithoutCanceling(t *testing.T) {
+	store := &controlStore{paused: map[string]runtimeops.PauseState{"token_usdt": {InstrumentID: "token_usdt", Paused: true, Reason: "manual_pause"}}}
+	// retainCanceled would keep the order even if canceled; we assert nothing is canceled at all.
+	client := &controlVenue{retainCanceled: true, orders: []domain.Order{{OrderID: "managed", ClientID: "fm-123", Symbol: "TOKENUSDT"}}}
+	cfg := config.Config{Mode: domain.ModeLive, Instruments: []config.InstrumentConfig{{ID: "token_usdt"}}, Venues: map[string]config.VenueConfig{"binance": {Type: "binance", Enabled: true, TradingEnabled: true, Markets: map[string]config.VenueMarketConfig{"token_usdt": {Symbol: "TOKENUSDT"}}}}}
+	e := New(cfg, nil, map[string]venue.Client{venue.ClientKey("binance", "token_usdt"): client}, audit.New(""), store, slog.Default())
+
+	if err := e.ApplyControls(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.canceled) != 0 {
+		t.Fatalf("manual close must not cancel orders, canceled=%v", client.canceled)
+	}
+	if len(store.published) != 1 || !store.published[0].Paused || store.published[0].Status != "paused" {
+		t.Fatalf("manual close should be acknowledged immediately as paused: %+v", store.published)
+	}
+	if len(client.orders) != 1 || client.orders[0].OrderID != "managed" {
+		t.Fatalf("resting order was not retained on the book: %+v", client.orders)
 	}
 }
 
@@ -548,5 +628,81 @@ func TestPausedInstrumentContinuesReadOnlyRuntimeRefresh(t *testing.T) {
 	}
 	if client.placed != 0 || len(client.canceled) != 0 {
 		t.Fatalf("read-only refresh mutated orders: placed=%d canceled=%v", client.placed, client.canceled)
+	}
+}
+
+type panicVenue struct{ controlVenue }
+
+func (p *panicVenue) TopBook(context.Context, string) (domain.Book, error) { panic("boom") }
+
+// TestInstrumentPanicIsIsolated proves that a panic while processing one pair is
+// contained: it surfaces only as that pair's error, the engine keeps running,
+// and the other pairs still complete their cycle.
+func TestInstrumentPanicIsIsolated(t *testing.T) {
+	store := &controlStore{}
+	healthy := &controlVenue{balances: []domain.Balance{{Asset: "GOOD", Free: num.Must("5")}, {Asset: "USDT", Free: num.Must("100")}}}
+	crashing := &panicVenue{}
+	cfg := config.Config{
+		Mode: domain.ModeShadow, MaxConcurrentInstruments: 2,
+		Instruments: []config.InstrumentConfig{
+			{ID: "good_usdt", Base: config.AssetConfig{Symbol: "GOOD"}, Quote: config.AssetConfig{Symbol: "USDT"}, Strategy: config.StrategyConfig{TargetBase: num.Must("1"), MaxBaseDeviation: num.Must("1")}},
+			{ID: "bad_usdt", Base: config.AssetConfig{Symbol: "BAD"}, Quote: config.AssetConfig{Symbol: "USDT"}, Strategy: config.StrategyConfig{TargetBase: num.Must("1"), MaxBaseDeviation: num.Must("1")}},
+		},
+		Venues: map[string]config.VenueConfig{"binance": {Type: "binance", Enabled: true, Markets: map[string]config.VenueMarketConfig{
+			"good_usdt": {Symbol: "GOODUSDT", BaseAsset: "GOOD", QuoteAsset: "USDT", PriceTick: num.Must("0.01"), QuantityStep: num.Must("1")},
+			"bad_usdt":  {Symbol: "BADUSDT", BaseAsset: "BAD", QuoteAsset: "USDT", PriceTick: num.Must("0.01"), QuantityStep: num.Must("1")},
+		}}},
+	}
+	clients := map[string]venue.Client{
+		venue.ClientKey("binance", "good_usdt"): healthy,
+		venue.ClientKey("binance", "bad_usdt"):  crashing,
+	}
+	e := New(cfg, prepareOracle{}, clients, audit.New(""), store, slog.Default())
+
+	err := e.RunOnce(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "panic") {
+		t.Fatalf("panicking pair should surface as an isolated error, got %v", err)
+	}
+	published := false
+	for _, s := range store.published {
+		if s.InstrumentID == "good_usdt" {
+			published = true
+		}
+	}
+	if !published {
+		t.Fatal("healthy pair did not run — a panic in another pair disturbed it")
+	}
+}
+
+// TestClosedInstrumentTakesPrecedenceOverPreflightBlock verifies that once a
+// pair is closed it stops degrading the cycle even if it is also preflight
+// blocked (e.g. its venue is down) — closing is how an operator silences such a
+// pair.
+func TestClosedInstrumentTakesPrecedenceOverPreflightBlock(t *testing.T) {
+	store := &controlStore{paused: map[string]runtimeops.PauseState{"token_usdt": {InstrumentID: "token_usdt", Paused: true, Reason: "manual_pause"}}}
+	client := &controlVenue{balances: []domain.Balance{{Asset: "TOKEN", Free: num.Must("1")}, {Asset: "USDT", Free: num.Must("50")}}}
+	cfg := config.Config{
+		Mode: domain.ModeLive, MaxConcurrentInstruments: 1,
+		Instruments: []config.InstrumentConfig{{ID: "token_usdt", Base: config.AssetConfig{Symbol: "TOKEN"}, Quote: config.AssetConfig{Symbol: "USDT"}}},
+		Venues: map[string]config.VenueConfig{"binance": {
+			Type: "binance", Enabled: true, TradingEnabled: true,
+			Markets: map[string]config.VenueMarketConfig{"token_usdt": {Symbol: "TOKENUSDT", BaseAsset: "TOKEN", QuoteAsset: "USDT", PriceTick: num.Must("0.01"), QuantityStep: num.Must("1")}},
+		}},
+	}
+	e := New(cfg, prepareOracle{}, map[string]venue.Client{venue.ClientKey("binance", "token_usdt"): client}, audit.New(""), store, slog.Default())
+	// Mark the pair preflight-blocked, as if its venue rules failed to load.
+	e.preflightMu.Lock()
+	e.preflightBlocked["token_usdt"] = "startup: rule refresh failed"
+	e.preflightMu.Unlock()
+
+	if err := e.ApplyControls(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("a closed pair must not degrade the cycle, even when blocked: %v", err)
+	}
+	latest := store.published[len(store.published)-1]
+	if !latest.Paused || latest.Status != "paused" {
+		t.Fatalf("closed pair should report paused, not the blocked/degraded state: %+v", latest)
 	}
 }

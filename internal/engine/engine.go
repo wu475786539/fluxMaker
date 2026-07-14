@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -230,6 +231,59 @@ func (e *Engine) preflightFailure(instrumentID string) (string, bool) {
 // previously acknowledged rule change does not cause a redundant cleanup.
 func (e *Engine) EffectiveConfig() config.Config { return e.cfg }
 
+// ApplyParameters hot-swaps strategy, trade-simulation and live scalar tuning
+// from a newly published configuration into the running engine without
+// rebuilding venue clients, re-syncing exchange rules, or canceling orders. It
+// is only valid for non-structural changes (configdiff.Plan.Structural == false)
+// and, like the runtime rule refresh, must be called from the single scheduler
+// goroutine between cycles so it never races the worker pool's reads of e.cfg.
+// Exchange-synced venue rules already held in e.cfg are deliberately preserved.
+func (e *Engine) ApplyParameters(next config.Config) {
+	byID := make(map[string]config.InstrumentConfig, len(next.Instruments))
+	for _, instrument := range next.Instruments {
+		byID[instrument.ID] = instrument
+	}
+	instruments := make([]config.InstrumentConfig, len(e.cfg.Instruments))
+	for i, current := range e.cfg.Instruments {
+		if updated, ok := byID[current.ID]; ok {
+			strategy := updated.Strategy
+			// Mirror applyRuntimeSafetyDefaults so a hot-applied strategy gets the
+			// same guardrails the full build path would have supplied.
+			if strategy.MaxVenueReferenceDeviationBPS == 0 {
+				strategy.MaxVenueReferenceDeviationBPS = 500
+			}
+			if strategy.MaxVenueSpreadBPS == 0 {
+				strategy.MaxVenueSpreadBPS = 1000
+			}
+			current.Strategy = strategy
+			current.TradeSimulation = updated.TradeSimulation
+		}
+		instruments[i] = current
+	}
+	e.cfg.Instruments = instruments
+	if next.PollIntervalMS > 0 {
+		e.cfg.PollIntervalMS = next.PollIntervalMS
+	}
+	if next.MaxConcurrentInstruments > 0 {
+		e.cfg.MaxConcurrentInstruments = next.MaxConcurrentInstruments
+	}
+	if next.RulesRefreshSeconds > 0 {
+		e.cfg.RulesRefreshSeconds = next.RulesRefreshSeconds
+	}
+	if next.MarketFailureThreshold > 0 {
+		e.cfg.MarketFailureThreshold = next.MarketFailureThreshold
+	}
+	if next.MarketRecoveryThreshold > 0 {
+		e.cfg.MarketRecoveryThreshold = next.MarketRecoveryThreshold
+	}
+	if next.MarketErrorGraceSeconds > 0 {
+		e.cfg.MarketErrorGraceSeconds = next.MarketErrorGraceSeconds
+	}
+	if next.TradingProgressTimeoutSeconds > 0 {
+		e.cfg.TradingProgressTimeoutSeconds = next.TradingProgressTimeoutSeconds
+	}
+}
+
 // InheritMetricsFrom keeps Prometheus counters monotonic across non-disruptive
 // configuration hot swaps within the same engine process.
 func (e *Engine) InheritMetricsFrom(previous *Engine) {
@@ -263,15 +317,7 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 			defer workers.Done()
 			for index := range jobs {
 				instrument := instruments[index]
-				unlock := e.lockInstrumentAccounts(instrument.ID)
-				if failure, blocked := e.preflightFailure(instrument.ID); blocked {
-					errorsByInstrument[index] = e.publishPreflightBlocked(ctx, instrument, failure)
-				} else if e.isPaused(instrument.ID) {
-					errorsByInstrument[index] = e.runPausedInstrument(ctx, instrument, balances)
-				} else {
-					errorsByInstrument[index] = e.runInstrument(ctx, instrument, cycleID, balances)
-				}
-				unlock()
+				errorsByInstrument[index] = e.runInstrumentGuarded(ctx, instrument, cycleID, balances)
 				if reporter, ok := e.runtime.(TradingProgressReporter); ok {
 					_ = reporter.ReportTradingProgress(ctx)
 				}
@@ -309,6 +355,32 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		return fmt.Errorf("tick failures: %s", strings.Join(failures, "; "))
 	}
 	return nil
+}
+
+// runInstrumentGuarded runs one instrument's cycle under its account locks and a
+// panic barrier. A panic or bug in one pair is converted into that pair's own
+// error; it never crashes the engine goroutine or disturbs the other pairs, so
+// instrument isolation holds even for programming faults.
+func (e *Engine) runInstrumentGuarded(ctx context.Context, instrument config.InstrumentConfig, cycleID string, balances *balanceCache) (runErr error) {
+	unlock := e.lockInstrumentAccounts(instrument.ID)
+	defer unlock()
+	defer func() {
+		if r := recover(); r != nil {
+			runErr = fmt.Errorf("panic: %v", r)
+			e.logger.Error("instrument cycle panicked", "instrument", instrument.ID, "panic", r, "stack", string(debug.Stack()))
+		}
+	}()
+	// A closed (paused) instrument wins over a preflight block: once the operator
+	// turns a pair off it must stop reporting failures, even if its venue is
+	// unreachable. runPausedInstrument is a best-effort read-only refresh that
+	// never degrades the cycle.
+	if e.isPaused(instrument.ID) {
+		return e.runPausedInstrument(ctx, instrument, balances)
+	}
+	if failure, blocked := e.preflightFailure(instrument.ID); blocked {
+		return e.publishPreflightBlocked(ctx, instrument, failure)
+	}
+	return e.runInstrument(ctx, instrument, cycleID, balances)
 }
 
 // Prepare verifies candidate dependencies without placing or canceling orders.
@@ -392,11 +464,14 @@ func (e *Engine) prepareInstrument(ctx context.Context, instrument config.Instru
 			continue
 		}
 		book, bookErr := client.TopBook(ctx, market.Symbol)
-		if bookErr != nil {
-			failures = append(failures, venueName+" book: "+bookErr.Error())
-			continue
+		if bookErr == nil {
+			e.setLastBookAt(e.marketFaultKey(venueName, instrument.ID, market), time.Now().UTC())
+		} else {
+			// Public depth is advisory for a reference-price market maker. A new
+			// market may be empty and a venue feed may be temporarily unavailable;
+			// neither prevents us from validating an index-anchored Post-Only plan.
+			book = domain.Book{Venue: venueName, Symbol: market.Symbol}
 		}
-		e.setLastBookAt(e.marketFaultKey(venueName, instrument.ID, market), time.Now().UTC())
 		if protectionErr := risk.ValidateMarketReference(ref, book, instrument.Strategy); protectionErr != nil {
 			failures = append(failures, venueName+" price protection: "+protectionErr.Error())
 			continue
@@ -716,6 +791,16 @@ func (e *Engine) ApplyControls(ctx context.Context) error {
 		alreadyApplied := e.pauseApplied[instrument.ID]
 		e.pauseMu.Unlock()
 		if alreadyApplied {
+			continue
+		}
+		if state.Reason != runtimeops.ReasonEmergencyCancel {
+			// Soft close: stop quoting but leave any resting orders untouched.
+			// Applies immediately and does not depend on venue reachability.
+			e.pauseMu.Lock()
+			e.pauseApplied[instrument.ID] = true
+			e.pauseMu.Unlock()
+			_ = e.audit.Record("instrument_paused", map[string]any{"instrument": instrument.ID, "reason": state.Reason, "requested_by": state.RequestedBy, "orders_retained": true})
+			e.publishPaused(ctx, instrument, "", nil)
 			continue
 		}
 		cancelErr := e.cancelInstrument(ctx, instrument)
@@ -1088,21 +1173,19 @@ func (e *Engine) runInstrument(ctx context.Context, instrument config.Instrument
 			venueSnapshot.Error = appendError(venueSnapshot.Error, "balance: "+balanceErr.Error())
 		}
 		bookStartedAt := time.Now()
-		book, err := client.TopBook(ctx, market.Symbol)
+		book, bookErr := client.TopBook(ctx, market.Symbol)
 		venueSnapshot.BookDurationMS = time.Since(bookStartedAt).Milliseconds()
-		if err != nil {
-			lastBook := e.getLastBookAt(e.marketFaultKey(venueName, instrument.ID, market))
-			stale := !lastBook.IsZero() && time.Since(lastBook) > time.Duration(e.cfg.MarketErrorGraceSeconds)*time.Second
-			state, cancelErr := e.markVenueFailure(ctx, instrument.ID, venueName, venueCfg, market, client, "book", err, stale)
-			venueSnapshot.Fault = &state
-			failures = append(failures, venueName+" book: "+err.Error())
-			venueSnapshot.Error = appendError(venueSnapshot.Error, appendError("book: "+err.Error(), errorString(cancelErr)))
-			snapshot.Venues = append(snapshot.Venues, venueSnapshot)
-			continue
+		if bookErr != nil {
+			// Quoting remains anchored to the external reference. Keep the public
+			// market-data outage visible to operators, but do not block or withdraw
+			// liquidity solely because an empty/new market has no usable top book.
+			venueSnapshot.Error = appendError(venueSnapshot.Error, "盘口不可用，按指数价铺单: "+bookErr.Error())
+			book = domain.Book{Venue: venueName, Symbol: market.Symbol}
+		} else {
+			venueSnapshot.MarketConnected = true
+			venueSnapshot.Book = &book
+			e.setLastBookAt(e.marketFaultKey(venueName, instrument.ID, market), time.Now().UTC())
 		}
-		venueSnapshot.MarketConnected = true
-		venueSnapshot.Book = &book
-		e.setLastBookAt(e.marketFaultKey(venueName, instrument.ID, market), time.Now().UTC())
 		if err := risk.ValidateMarketReference(ref, book, instrument.Strategy); err != nil {
 			state, cancelErr := e.markVenueFailure(ctx, instrument.ID, venueName, venueCfg, market, client, "market_reference", err, true)
 			venueSnapshot.Fault = &state
@@ -1260,7 +1343,15 @@ func (e *Engine) runInstrument(ctx context.Context, instrument config.Instrument
 		leaseCtx, stopLeaseRenewal := e.keepMarketLease(ctx, leaseKey, leaseGeneration)
 		guard := e.marketWriteGuard(leaseKey, leaseGeneration)
 		omsStartedAt := time.Now()
-		result, err := e.reconciler.ReconcileWithOrdersGuarded(leaseCtx, client, instrument.ID, quotes, instrument.Strategy.RepriceThresholdBPS, venueSnapshot.OpenOrders, guard, leaseGeneration)
+		refreshPolicy := oms.RefreshPolicy{}
+		if instrument.Strategy.QuoteRefreshSeconds > 0 {
+			refreshPolicy = oms.RefreshPolicy{
+				MinOrderAge:          instrument.Strategy.EffectiveMinOrderLifetime(),
+				MaxOrderAge:          instrument.Strategy.EffectiveMaxOrderLifetime(),
+				MaxRefreshesPerCycle: instrument.Strategy.RefreshOrdersPerCycle(len(quotes)),
+			}
+		}
+		result, err := e.reconciler.ReconcileWithOrdersGuardedPolicy(leaseCtx, client, instrument.ID, quotes, instrument.Strategy.RepriceThresholdBPS, venueSnapshot.OpenOrders, guard, leaseGeneration, refreshPolicy)
 		venueSnapshot.OMSDurationMS = time.Since(omsStartedAt).Milliseconds()
 		if err != nil {
 			canceled, cancelErr := e.reconciler.CancelManagedGuardedWithResult(leaseCtx, client, instrument.ID, market.Symbol, guard)

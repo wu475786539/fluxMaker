@@ -32,6 +32,35 @@ func TestGenerateQuotes(t *testing.T) {
 	}
 }
 
+func TestGenerateSeedsEmptyBookFromReference(t *testing.T) {
+	in := config.InstrumentConfig{ID: "gdt_usdt", Strategy: config.StrategyConfig{HalfSpreadBPS: 50, LevelSpacingBPS: 25, Levels: 2, OrderSize: num.Must("10")}}
+	market := config.VenueMarketConfig{Symbol: "GDT_USDT", PriceTick: num.Must("0.01"), QuantityStep: num.Must("1"), MinNotional: num.Must("1")}
+	ref := domain.ReferencePrice{Price: num.Must("100"), ValidUntil: time.Now().Add(time.Minute)}
+
+	quotes, err := (Generator{}).Generate(in, "mgbx", market, ref, domain.Book{}, num.Decimal{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(quotes) != 4 || quotes[0].Price.String() != "99.5" || quotes[1].Price.String() != "100.5" {
+		t.Fatalf("quotes=%+v", quotes)
+	}
+}
+
+func TestGenerateUsesAvailableSideOnlyAsPostOnlyBoundary(t *testing.T) {
+	in := config.InstrumentConfig{ID: "gdt_usdt", Strategy: config.StrategyConfig{HalfSpreadBPS: 50, Levels: 1, OrderSize: num.Must("10")}}
+	market := config.VenueMarketConfig{Symbol: "GDT_USDT", PriceTick: num.Must("0.01"), QuantityStep: num.Must("1"), MinNotional: num.Must("1")}
+	ref := domain.ReferencePrice{Price: num.Must("100"), ValidUntil: time.Now().Add(time.Minute)}
+	book := domain.Book{AskPrice: num.Must("99"), AskQty: num.Must("1"), Timestamp: time.Now()}
+
+	quotes, err := (Generator{}).Generate(in, "mgbx", market, ref, book, num.Decimal{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if quotes[0].Price.String() != "98.99" || quotes[1].Price.String() != "100.5" {
+		t.Fatalf("quotes=%+v", quotes)
+	}
+}
+
 func TestLongInventoryMovesQuotesDown(t *testing.T) {
 	cfg := config.StrategyConfig{TargetBase: num.Must("10"), MaxBaseDeviation: num.Must("5"), InventorySkewBPS: 100}
 	if got := applyInventorySkew(num.Must("100"), cfg, num.Must("15")); got.Cmp(num.Must("99")) != 0 {
@@ -145,5 +174,77 @@ func TestGenerateKeepsLegacyFixedQuantity(t *testing.T) {
 		if quote.Quantity.Cmp(num.Must("1.2")) != 0 {
 			t.Fatalf("legacy quantity=%s want=1.2", quote.Quantity)
 		}
+	}
+}
+
+func TestGenerateAtRotatesOnlyScheduledDeepLevels(t *testing.T) {
+	in := config.InstrumentConfig{ID: "token_usdt", Strategy: config.StrategyConfig{
+		HalfSpreadBPS: 50, LevelSpacingBPS: 25, Levels: 10,
+		MinOrderNotional: num.Must("10"), MaxOrderNotional: num.Must("20"), RepriceThresholdBPS: 10,
+		QuoteRefreshSeconds: 45, QuoteRefreshRatioBPS: 2500, PriceJitterTicks: 2,
+		BestLevels: 2, BestLevelRefreshSeconds: 3600,
+	}}
+	market := config.VenueMarketConfig{Symbol: "TOKENUSDT", PriceTick: num.Must("0.01"), QuantityStep: num.Must("0.01"), MinNotional: num.Must("5")}
+	ref := domain.ReferencePrice{Price: num.Must("100"), ValidUntil: time.Now().Add(time.Minute)}
+	t0 := time.Unix(4*3600+5, 0).UTC()
+	first, err := (Generator{}).GenerateAt(in, "binance", market, ref, domain.Book{}, num.Decimal{}, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := (Generator{}).GenerateAt(in, "binance", market, ref, domain.Book{}, num.Decimal{}, t0.Add(45*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedBuy, changedSell := 0, 0
+	for index := range first {
+		changed := first[index].Price.Cmp(second[index].Price) != 0 || first[index].Quantity.Cmp(second[index].Quantity) != 0
+		if index < 4 && changed {
+			t.Fatalf("best level changed before its slower refresh window: index=%d", index)
+		}
+		if !changed {
+			continue
+		}
+		if first[index].Side == domain.Buy {
+			changedBuy++
+		} else {
+			changedSell++
+		}
+	}
+	if changedBuy != 2 || changedSell != 2 {
+		t.Fatalf("changed buy/sell=%d/%d want=2/2", changedBuy, changedSell)
+	}
+}
+
+func TestGenerateAtIsStableInsideRefreshWindow(t *testing.T) {
+	in := config.InstrumentConfig{ID: "token_usdt", Strategy: config.StrategyConfig{
+		HalfSpreadBPS: 50, LevelSpacingBPS: 25, Levels: 5,
+		MinOrderNotional: num.Must("10"), MaxOrderNotional: num.Must("20"), RepriceThresholdBPS: 10,
+		QuoteRefreshSeconds: 45, QuoteRefreshRatioBPS: 1000, PriceJitterTicks: 2,
+		BestLevels: 3, BestLevelRefreshSeconds: 90,
+	}}
+	market := config.VenueMarketConfig{Symbol: "TOKENUSDT", PriceTick: num.Must("0.01"), QuantityStep: num.Must("0.01"), MinNotional: num.Must("5")}
+	ref := domain.ReferencePrice{Price: num.Must("100"), ValidUntil: time.Now().Add(time.Minute)}
+	t0 := time.Unix(18005, 0).UTC()
+	first, err := (Generator{}).GenerateAt(in, "binance", market, ref, domain.Book{}, num.Decimal{}, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := (Generator{}).GenerateAt(in, "binance", market, ref, domain.Book{}, num.Decimal{}, t0.Add(10*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range first {
+		if first[index].Price.Cmp(second[index].Price) != 0 || first[index].Quantity.Cmp(second[index].Quantity) != 0 {
+			t.Fatalf("quote %d changed inside one refresh window", index)
+		}
+	}
+}
+
+func TestPriceJitterIsCappedByRepriceThreshold(t *testing.T) {
+	if got := boundedJitterTicks(num.Must("1"), num.Must("0.1"), 3, 10); got != 0 {
+		t.Fatalf("coarse tick jitter=%d want=0", got)
+	}
+	if got := boundedJitterTicks(num.Must("100"), num.Must("0.01"), 3, 10); got != 3 {
+		t.Fatalf("fine tick jitter=%d want=3", got)
 	}
 }

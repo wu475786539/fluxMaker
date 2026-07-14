@@ -348,11 +348,11 @@ func redactRuntimeSnapshot(session auth.Session, snapshot *runtimeops.Instrument
 }
 
 func (s *Server) pauseInstrument(w http.ResponseWriter, r *http.Request) {
-	s.controlPause(w, r, "manual_pause", "runtime.pause")
+	s.controlPause(w, r, runtimeops.ReasonManualPause, "runtime.pause")
 }
 
 func (s *Server) emergencyCancel(w http.ResponseWriter, r *http.Request) {
-	s.controlPause(w, r, "emergency_cancel", "runtime.emergency_cancel")
+	s.controlPause(w, r, runtimeops.ReasonEmergencyCancel, "runtime.emergency_cancel")
 }
 
 func (s *Server) controlPause(w http.ResponseWriter, r *http.Request, reason, action string) {
@@ -600,7 +600,14 @@ func (s *Server) putDraft(w http.ResponseWriter, r *http.Request) {
 		}
 		cfg = mergeScopedConfig(existing, cfg, session)
 	}
-	if err := s.configs.PutDraft(r.Context(), cfg, session.UserID); err != nil {
+	// Saving now takes effect immediately: validate credential bindings and
+	// atomically activate the edit. The running engine picks it up by content
+	// diff on its next reload — no separate publish step.
+	if err := s.validateCredentialBindings(r.Context(), cfg); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := s.configs.SaveActive(r.Context(), cfg, session.UserID); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -647,27 +654,21 @@ func mergeScopedConfig(existing, incoming config.Config, session auth.Session) c
 	return merged
 }
 
+// publish is retained for backward compatibility with clients that still call
+// it after saving. Edits now take effect on save (see putDraft), so this is an
+// idempotent no-op that simply returns the already-active configuration.
 func (s *Server) publish(w http.ResponseWriter, r *http.Request) {
 	session := sessionFromContext(r.Context())
-	draft, err := s.configs.GetDraft(r.Context())
+	snapshot, err := s.configs.LoadActive(r.Context())
+	if errors.Is(err, configstore.ErrNoActive) {
+		writeError(w, http.StatusBadRequest, "no configuration has been saved yet")
+		return
+	}
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusInternalServerError, "load active configuration failed")
 		return
 	}
-	if err := enforceInstrumentScope(session, draft); err != nil {
-		writeError(w, http.StatusForbidden, err.Error())
-		return
-	}
-	if err := s.validateCredentialBindings(r.Context(), draft); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	snapshot, err := s.configs.PublishDraft(r.Context(), session.UserID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	snapshot.Config = scopeConfig(sessionFromContext(r.Context()), snapshot.Config)
+	snapshot.Config = scopeConfig(session, snapshot.Config)
 	writeJSON(w, http.StatusOK, snapshot)
 }
 

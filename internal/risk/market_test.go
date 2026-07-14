@@ -21,3 +21,17 @@ func TestMarketReferenceProtection(t *testing.T) {
 		t.Fatal("expected venue spread rejection")
 	}
 }
+
+func TestMarketReferenceAllowsMakerBootstrapWithoutTwoSidedBook(t *testing.T) {
+	ref := domain.ReferencePrice{Price: num.Must("100")}
+	strategy := config.StrategyConfig{MaxVenueReferenceDeviationBPS: 100, MaxVenueSpreadBPS: 100}
+	for _, book := range []domain.Book{
+		{},
+		{BidPrice: num.Must("1")},
+		{AskPrice: num.Must("1000")},
+	} {
+		if err := ValidateMarketReference(ref, book, strategy); err != nil {
+			t.Fatalf("book=%+v err=%v", book, err)
+		}
+	}
+}

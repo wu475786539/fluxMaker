@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -80,30 +81,43 @@ func (c *Client) TopBook(ctx context.Context, symbol string) (domain.Book, error
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return domain.Book{}, err
 	}
-	if len(raw.Bids) == 0 || len(raw.Asks) == 0 || len(raw.Bids[0]) < 2 || len(raw.Asks[0]) < 2 {
-		return domain.Book{}, fmt.Errorf("MGBX returned empty book")
-	}
-	bid, err := num.Parse(raw.Bids[0][0])
-	if err != nil {
-		return domain.Book{}, err
-	}
-	bidQty, err := num.Parse(raw.Bids[0][1])
-	if err != nil {
-		return domain.Book{}, err
-	}
-	ask, err := num.Parse(raw.Asks[0][0])
-	if err != nil {
-		return domain.Book{}, err
-	}
-	askQty, err := num.Parse(raw.Asks[0][1])
-	if err != nil {
-		return domain.Book{}, err
-	}
 	ts := time.Now().UTC()
 	if raw.Timestamp > 0 {
 		ts = time.UnixMilli(raw.Timestamp).UTC()
 	}
-	return domain.Book{Venue: c.name, Symbol: raw.Symbol, BidPrice: bid, BidQty: bidQty, AskPrice: ask, AskQty: askQty, Timestamp: ts}, nil
+	book := domain.Book{Venue: c.name, Symbol: raw.Symbol, Timestamp: ts}
+	if book.Symbol == "" {
+		book.Symbol = symbol
+	}
+	if len(raw.Bids) > 0 {
+		if len(raw.Bids[0]) < 2 {
+			return domain.Book{}, fmt.Errorf("decode MGBX bid: expected price and quantity")
+		}
+		bid, err := num.Parse(raw.Bids[0][0])
+		if err != nil {
+			return domain.Book{}, fmt.Errorf("decode MGBX bid price: %w", err)
+		}
+		bidQty, err := num.Parse(raw.Bids[0][1])
+		if err != nil {
+			return domain.Book{}, fmt.Errorf("decode MGBX bid quantity: %w", err)
+		}
+		book.BidPrice, book.BidQty = bid, bidQty
+	}
+	if len(raw.Asks) > 0 {
+		if len(raw.Asks[0]) < 2 {
+			return domain.Book{}, fmt.Errorf("decode MGBX ask: expected price and quantity")
+		}
+		ask, err := num.Parse(raw.Asks[0][0])
+		if err != nil {
+			return domain.Book{}, fmt.Errorf("decode MGBX ask price: %w", err)
+		}
+		askQty, err := num.Parse(raw.Asks[0][1])
+		if err != nil {
+			return domain.Book{}, fmt.Errorf("decode MGBX ask quantity: %w", err)
+		}
+		book.AskPrice, book.AskQty = ask, askQty
+	}
+	return book, nil
 }
 
 func (c *Client) MarketRules(ctx context.Context, symbol string) (domain.MarketRules, error) {
@@ -337,11 +351,7 @@ func (c *Client) do(ctx context.Context, method, path string, values url.Values,
 			return nil, fmt.Errorf("MGBX credentials are not configured")
 		}
 		timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
-		canonical := values.Encode()
-		if canonical != "" {
-			canonical += "&"
-		}
-		canonical += "timestamp=" + timestamp
+		canonical := signaturePayload(values, timestamp)
 		mac := hmac.New(sha256.New, []byte(c.secret))
 		mac.Write([]byte(canonical))
 		nonce, err := randomNonce()
@@ -381,6 +391,26 @@ func (c *Client) do(ctx context.Context, method, path string, values url.Values,
 		return nil, fmt.Errorf("MGBX code %d: %s", env.Code, message)
 	}
 	return env.Data, nil
+}
+
+// signaturePayload follows the exchange's TreeMap examples byte for byte:
+// values are sorted by key but remain raw while signing (JSON brackets, quotes
+// and spaces must not be query-escaped), and the separator before timestamp is
+// retained even when there are no ordinary parameters. URL encoding happens
+// later and affects only the request URI, not the HMAC input.
+func signaturePayload(values url.Values, timestamp string) string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(values))
+	for _, key := range keys {
+		for _, value := range values[key] {
+			parts = append(parts, key+"="+value)
+		}
+	}
+	return strings.Join(parts, "&") + "&timestamp=" + timestamp
 }
 
 func randomNonce() (string, error) {

@@ -26,10 +26,7 @@ const state = {
     validationIssues: [],
     safetyAdjustments: 0,
     pairInspection: {},
-    publishModal: false,
-    publishing: false,
-    publishPlan: null,
-    planLoading: false,
+    confirm: null,
   },
 };
 
@@ -150,7 +147,7 @@ function renderLogin() {
         <div class="login-copy">
           <span class="eyebrow">Liquidity operations</span>
           <h1>让每一个币对，都有清晰可控的运行边界。</h1>
-          <p>统一管理链上参考价、交易市场、账号凭证和库存风险。所有发布与敏感操作都会被记录。</p>
+          <p>统一管理链上参考价、交易市场、账号凭证和库存风险。所有配置与敏感操作都会被记录。</p>
           <div class="login-points">
             <span>配置分步校验</span><span>凭证加密保存</span><span>Shadow 优先</span>
           </div>
@@ -238,53 +235,33 @@ function render() {
           <div><span class="eyebrow">${esc(meta.kicker)}</span><h1>${esc(meta.title)}</h1><p>${esc(meta.subtitle)}</p></div>
           <div class="top-actions">${topActions()}</div>
         </header>
-        ${state.dirty ? `<div class="draft-banner"><span><b>${state.ui.safetyAdjustments ? "已自动应用 Live 安全修正" : "有未保存修改"}</b> · ${state.ui.safetyAdjustments ? `已关闭 ${state.ui.safetyAdjustments} 个币对的暖机 Spot，请保存草稿后发布` : "先保存草稿，再进行发布"}</span><button class="btn small" id="discard">放弃修改</button></div>` : ""}
+        ${state.dirty ? `<div class="draft-banner"><span><b>${state.ui.safetyAdjustments ? "已自动应用 Live 安全修正" : "有未保存修改"}</b> · ${state.ui.safetyAdjustments ? `已关闭 ${state.ui.safetyAdjustments} 个币对的暖机 Spot，点保存即生效` : "点“保存”即刻生效"}</span><button class="btn small" id="discard">放弃修改</button></div>` : ""}
         ${state.ui.validationIssues.length ? validationIssuesPanel() : ""}
         <section id="content">${pageHTML()}</section>
       </main>
     </div>
-    ${state.ui.publishModal ? publishConfirmModal() : ""}
-    ${state.ui.passwordModal ? ownPasswordModal() : ""}`;
+    ${state.ui.passwordModal ? ownPasswordModal() : ""}
+    ${state.ui.confirm ? confirmModal() : ""}`;
   bind();
 }
 
 function validationIssuesPanel() {
-  return `<section class="validation-issues" role="alert"><div><span class="guide-icon">!</span><div><strong>发布前还需要处理 ${state.ui.validationIssues.length} 项</strong><p>下面是具体位置和原因，不需要逐页猜测。</p></div></div><button class="icon-btn" id="validation-close" type="button" aria-label="关闭">×</button><ol>${state.ui.validationIssues.map((issue, index) => `<li><span>${esc(issue)}</span><button class="btn small" data-validation-issue="${index}">去处理</button></li>`).join("")}</ol></section>`;
+  return `<section class="validation-issues" role="alert"><div><span class="guide-icon">!</span><div><strong>保存前还需要处理 ${state.ui.validationIssues.length} 项</strong><p>下面是具体位置和原因，不需要逐页猜测。</p></div></div><button class="icon-btn" id="validation-close" type="button" aria-label="关闭">×</button><ol>${state.ui.validationIssues.map((issue, index) => `<li><span>${esc(issue)}</span><button class="btn small" data-validation-issue="${index}">去处理</button></li>`).join("")}</ol></section>`;
+}
+
+function confirmModal() {
+  const c = state.ui.confirm;
+  if (!c) return "";
+  return `<div class="modal-backdrop" id="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title">
+    <section class="publish-modal confirm-modal">
+      <div class="modal-head"><span class="modal-icon ${c.danger ? "danger" : ""}">${c.danger ? "!" : "?"}</span><div><h2 id="confirm-modal-title">${esc(c.title)}</h2><p>${esc(c.body)}</p></div></div>
+      <div class="modal-actions"><button class="btn" id="confirm-cancel" type="button">取消</button><button class="btn ${c.danger ? "danger-solid" : "primary"}" id="confirm-ok" type="button">${esc(c.label)}</button></div>
+    </section>
+  </div>`;
 }
 
 function ownPasswordModal() {
   return `<div class="modal-backdrop" id="password-modal" role="dialog" aria-modal="true" aria-labelledby="password-modal-title"><section class="publish-modal"><div class="modal-head"><span class="modal-icon">⌘</span><div><span class="eyebrow">ACCOUNT SECURITY</span><h2 id="password-modal-title">修改我的密码</h2><p>更新当前账户的登录凭证。</p></div><button class="icon-btn" id="password-cancel-x" type="button" aria-label="关闭">×</button></div><form id="change-own-password"><div class="form-grid"><div class="field span-2"><label>当前密码</label><input name="current_password" type="password" required autocomplete="current-password"></div><div class="field span-2"><label>新密码</label><input name="new_password" type="password" minlength="12" required autocomplete="new-password"></div></div><div class="form-actions"><span>修改成功后，所有旧会话都会失效。</span><div><button class="btn" id="password-cancel" type="button">取消</button> <button class="btn primary" type="submit">修改并重新登录</button></div></div></form></section></div>`;
-}
-
-function publishConfirmModal() {
-  const response = state.ui.publishPlan;
-  const plan = response?.plan;
-  const nextVersion = Number(response?.to_version || state.active?.version || 0) + (response ? 0 : 1);
-  const pairCount = (state.draft.instruments || []).length;
-  const cancelCount = plan?.cancel_targets?.length || 0;
-  const impactClass = plan?.cancel_all || cancelCount > 0 ? "danger" : "safe";
-  const impactTitle = plan?.cancel_all ? "本次是全局停止操作，需要撤销全部受管挂单" : cancelCount > 0 ? `只撤销 ${cancelCount} 个受影响市场的挂单` : "本次发布不需要强制撤单";
-  const impactDetail = plan?.cancel_all
-    ? "只有 Live→Shadow 等明确的全局停止才会执行全部撤单。"
-    : cancelCount > 0
-      ? "未列入撤单范围的币对保持正常报价，不会清空全部盘口。"
-      : "RPC、运行参数和普通策略变化会在候选配置验证通过后热切换，由 OMS 只调整不匹配订单。";
-  return `<div class="modal-backdrop" id="publish-modal" role="dialog" aria-modal="true" aria-labelledby="publish-modal-title">
-    <section class="publish-modal">
-      <div class="modal-head"><span class="modal-icon">⇧</span><div><span class="eyebrow">PUBLISH CONFIGURATION</span><h2 id="publish-modal-title">发布全局配置 v${nextVersion}</h2><p>把当前草稿保存为不可变的运行快照。</p></div><button class="icon-btn" id="publish-cancel-x" aria-label="关闭">×</button></div>
-      ${state.ui.planLoading ? `<div class="loading-state">正在计算新旧版本差异和撤单范围…</div>` : `<div class="publish-summary">
-        <span><small>版本变化</small><b>${state.active ? `v${state.active.version} → v${nextVersion}` : `首次发布 v${nextVersion}`}</b></span>
-        <span><small>受影响币对</small><b>${plan?.affected_instruments ?? pairCount} 个</b></span>
-        <span><small>保持运行</small><b>${plan?.unchanged_instruments ?? 0} 个</b></span>
-      </div>
-      <div class="publish-explanation"><strong>全局版本不再等于全量重启</strong><p>版本仍包含全部配置用于审计和回滚，但交易引擎会先计算差异，只热更新受影响对象。候选配置失败时，当前运行版本继续报价。</p></div>
-      <div class="publish-impact ${impactClass}"><span>${impactClass === "danger" ? "!" : "✓"}</span><div><strong>${esc(impactTitle)}</strong><p>${esc(impactDetail)}</p></div></div>
-      ${plan?.hot_changes?.length ? `<div class="plan-section"><strong>无需撤单的热更新</strong><div>${plan.hot_changes.map((item) => `<span>${esc(item)}</span>`).join("")}</div></div>` : ""}
-      ${cancelCount ? `<div class="plan-section cancel-plan"><strong>定向撤单范围</strong><div>${plan.cancel_targets.slice(0, 8).map((item) => `<span>${esc(item.instrument_id)} · ${esc(item.venue)} · ${esc(item.reason)}</span>`).join("")}</div></div>` : ""}
-      <ol class="publish-steps"><li><span>1</span><p><b>生成目标版本 v${nextVersion}</b><small>数据库保留不可变配置快照和发布审计。</small></p></li><li><span>2</span><p><b>后台构建并验证候选运行时</b><small>验证 RPC、TWAP、盘口和实盘账户；失败时旧版本继续运行。</small></p></li><li><span>3</span><p><b>增量切换</b><small>只处理差异计划中的币对和市场，其他盘口保持不动。</small></p></li></ol>`}
-      <div class="modal-actions"><button class="btn" id="publish-cancel" ${state.ui.publishing ? "disabled" : ""}>返回检查</button><button class="btn ${impactClass === "danger" ? "danger-solid" : "primary"}" id="publish-confirm" ${state.ui.publishing || state.ui.planLoading || !plan ? "disabled" : ""}>${state.ui.publishing ? "正在发布…" : `确认发布 v${nextVersion}`}</button></div>
-    </section>
-  </div>`;
 }
 
 function pageMeta() {
@@ -307,16 +284,9 @@ function pageMeta() {
 function topActions() {
   const configPages = ["overview", "pairs", "pair", "venues", "settings"];
   if (!configPages.includes(state.page)) return "";
-  const unpublished = hasUnpublishedChanges();
-  return `
-    <span class="version-chip">${state.active ? `已发布目标 v${state.active.version}${unpublished ? " · 有待发布草稿" : ""}` : "尚未发布"}</span>
-    ${has("config:edit") ? `<button class="btn" id="save" ${state.dirty ? "" : "disabled"}>保存全部草稿</button>` : ""}
-    ${has("config:publish") ? `<button class="btn primary" id="publish" ${state.dirty || !unpublished ? "disabled" : ""} title="${state.dirty ? "请先保存全部草稿" : !unpublished ? "当前草稿与运行版本一致" : "发布全部配置为新的全局版本"}">发布全局版本</button>` : ""}`;
-}
-
-function hasUnpublishedChanges() {
-  if (!state.active?.config) return true;
-  return stableJSON(state.draft) !== stableJSON(state.active.config);
+  return has("config:edit")
+    ? `<button class="btn primary" id="save" ${state.dirty ? "" : "disabled"}>${state.dirty ? "保存" : "已保存"}</button>`
+    : "";
 }
 
 function stableJSON(value) {
@@ -354,15 +324,15 @@ function overviewPage() {
         <span class="status-dot ${state.draft.mode === "live" ? "live" : "shadow"}"></span>
         <span class="eyebrow">当前配置模式</span>
         <h2>${state.draft.mode === "live" ? "实盘模式" : "Shadow 模式"}</h2>
-        <p>${state.draft.mode === "live" ? "发布后允许已启用交易所发送真实订单。" : "仅生成报价计划，不会向交易所发送订单。"}</p>
+        <p>${state.draft.mode === "live" ? "已启用交易所会发送真实订单。" : "仅生成报价计划，不会向交易所发送订单。"}</p>
       </div>
-      <div class="hero-side"><span>交易引擎</span><strong class="${state.runtime.engine?.online && state.runtime.engine?.ready ? "online-text" : "offline-text"}">${!state.runtime.engine?.online ? "离线" : applyingVersion ? `运行 v${state.runtime.engine.version} · 准备 v${state.runtime.engine.desired_version}` : state.runtime.engine?.ready ? `在线 · v${state.runtime.engine.version}` : "在线 · 运行未就绪"}</strong><small>${running} 运行 · ${paused} 暂停</small><div class="progress"><i style="width:${state.runtime.engine?.online && state.runtime.engine?.ready ? 100 : 8}%"></i></div></div>
+      <div class="hero-side"><span>交易引擎</span><strong class="${state.runtime.engine?.online && state.runtime.engine?.ready ? "online-text" : "offline-text"}">${!state.runtime.engine?.online ? "离线" : applyingVersion ? "在线 · 应用新配置中" : state.runtime.engine?.ready ? "在线" : "在线 · 运行未就绪"}</strong><small>${running} 运行 · ${paused} 暂停</small><div class="progress"><i style="width:${state.runtime.engine?.online && state.runtime.engine?.ready ? 100 : 8}%"></i></div></div>
     </div>
     <div class="metrics">
       ${metric("币对", pairs.length, `${ready} 个配置就绪`)}
       ${metric("正在运行", running, `${paused} 个已暂停`)}
       ${metric("交易所", activeVenues, `${Object.keys(state.draft.venues || {}).length} 个已维护`)}
-      ${metric("发布版本", state.active?.version || "—", state.active ? formatDate(state.active.published_at) : "尚未发布")}
+      ${metric("配置", state.active ? "已生效" : "未配置", state.active ? formatDate(state.active.published_at) : "—")}
     </div>
     <div class="content-grid overview-grid">
       <section class="panel span-2">
@@ -370,8 +340,8 @@ function overviewPage() {
         ${pairs.length ? `<div class="data-list">${pairs.map(pairRow).join("")}</div>` : emptyState("还没有币对", "从第一个币对开始配置链上价格和交易市场。", "新增币对", "show-create-pair")}
       </section>
       <section class="panel">
-        <div class="panel-head"><div><h2>发布前检查</h2><p>严格校验只在发布时执行。</p></div></div>
-        ${allIssues.length ? `<ul class="issue-list">${allIssues.slice(0, 8).map((issue) => `<li><span>!</span>${esc(issue)}</li>`).join("")}</ul>` : `<div class="success-state"><span>✓</span><strong>配置检查通过</strong><p>可以保存并发布新版本。</p></div>`}
+        <div class="panel-head"><div><h2>保存前检查</h2><p>严格校验在保存时执行。</p></div></div>
+        ${allIssues.length ? `<ul class="issue-list">${allIssues.slice(0, 8).map((issue) => `<li><span>!</span>${esc(issue)}</li>`).join("")}</ul>` : `<div class="success-state"><span>✓</span><strong>配置检查通过</strong><p>可以保存并生效。</p></div>`}
       </section>
     </div>`;
 }
@@ -384,18 +354,18 @@ function runtimePage() {
   const engine = state.runtime.engine || {};
   const instruments = state.runtime.instruments || [];
   const applying = engine.online && engine.ready && Number(engine.desired_version || 0) > Number(engine.version || 0);
-  const engineHeading = !engine.online ? "交易引擎离线" : applying ? "当前版本持续运行，新版本准备中" : engine.ready ? "交易引擎在线" : "引擎在线，运行未就绪";
+  const engineHeading = !engine.online ? "交易引擎离线" : applying ? "正在应用新配置" : engine.ready ? "交易引擎在线" : "引擎在线，运行未就绪";
   const performance = engine.performance;
   const performanceText = performance ? ` · 最近一轮 ${performance.duration_ms}ms · ${performance.succeeded}/${performance.instruments} 成功 · 并发上限 ${performance.concurrent_limit}` : "";
   const monitoring = state.runtime.monitoring || { status: "healthy", critical: 0, warnings: 0, alerts: [] };
-  const engineDetail = !engine.online ? "未检测到最近 15 秒内的引擎心跳" : applying ? `运行 v${engine.version} · 目标 v${engine.desired_version} · ${engine.error || "正在执行候选预检"}` : engine.ready ? `运行版本 v${engine.version} · 进程心跳 ${formatRelative(engine.last_heartbeat)} · 交易进度 ${engine.last_trading_progress ? formatRelative(engine.last_trading_progress) : "等待首轮"}${performanceText}` : (engine.error || "等待有效的已发布配置");
+  const engineDetail = !engine.online ? "未检测到最近 15 秒内的引擎心跳" : applying ? `正在应用新配置 · ${engine.error || "预检中"}` : engine.ready ? `进程心跳 ${formatRelative(engine.last_heartbeat)} · 交易进度 ${engine.last_trading_progress ? formatRelative(engine.last_trading_progress) : "等待首轮"}${performanceText}` : (engine.error || "等待配置生效");
   return `
     <div class="engine-banner ${engine.online && engine.ready ? "online" : engine.online ? "waiting" : "offline"}">
       <div><span class="connection-pulse"></span><div><span class="eyebrow">ENGINE STATUS</span><h2>${engineHeading}</h2><p>${esc(engineDetail)}</p></div></div>
       <button class="btn" data-action="refresh-runtime">刷新状态</button>
     </div>
     ${monitoringPanel(monitoring)}
-    ${instruments.length ? `<div class="runtime-grid">${instruments.map(runtimeCard).join("")}</div>` : emptyState("暂无运行币对", "发布配置并启动交易引擎后，运行快照会出现在这里。", "前往币对管理", "back-pairs")}`;
+    ${instruments.length ? `<div class="runtime-grid">${instruments.map(runtimeCard).join("")}</div>` : emptyState("暂无运行币对", "保存配置并启动交易引擎后，运行快照会出现在这里。", "前往币对管理", "back-pairs")}`;
 }
 
 function monitoringPanel(monitoring) {
@@ -476,10 +446,10 @@ function pairPage() {
       <div class="pair-identity"><span class="token-icon large">${esc(pair.base.symbol?.slice(0, 1))}</span><div><h2>${esc(pair.base.symbol)}/${esc(pair.quote.symbol)}</h2><p>${esc(pair.id)}</p></div></div>
       <div class="summary-facts"><span><small>配置状态</small><b class="state-text ${issues.length ? "warn" : "ok"}">${issues.length ? "待完善" : "就绪"}</b></span><span><small>价格来源</small><b>Pancake V2</b></span><span><small>交易市场</small><b>${marketsForPair(pair.id).length}</b></span></div>
     </section>
-    ${issues.length ? `<div class="validation-card"><strong>完成以下项目后才能发布</strong><div>${issues.map((issue) => `<span>• ${esc(issue)}</span>`).join("")}</div></div>` : ""}
+    ${issues.length ? `<div class="validation-card"><strong>完成以下项目后才能保存</strong><div>${issues.map((issue) => `<span>• ${esc(issue)}</span>`).join("")}</div></div>` : ""}
     <div class="tabs">${tabs.map(([id, label]) => `<button data-pair-tab="${id}" class="${state.pairTab === id ? "active" : ""}">${label}</button>`).join("")}</div>
     ${pairTabContent(pair)}
-    ${has("instrument:edit") && has("config:edit") ? `<section class="danger-zone"><div><strong>删除币对</strong><p>只会删除草稿中的币对及其交易市场映射，发布后才会影响运行版本。</p></div><button class="btn danger" data-action="delete-pair">删除 ${esc(pair.id)}</button></section>` : ""}`;
+    ${has("instrument:edit") && has("config:edit") ? `<section class="danger-zone"><div><strong>删除币对</strong><p>只会删除草稿中的币对及其交易市场映射，保存后立即从运行引擎移除。</p></div><button class="btn danger" data-action="delete-pair">删除 ${esc(pair.id)}</button></section>` : ""}`;
 }
 
 function pairTabContent(pair) {
@@ -499,14 +469,14 @@ function runtimeTab(pair) {
   const resumePending = snapshot.status === "resuming";
   const pauseRequested = snapshot.paused || pausePending;
   const controls = `<div class="runtime-actions">
-    ${pauseRequested && has("runtime:start") ? `<button class="btn primary" data-runtime-action="resume" data-id="${esc(pair.id)}">恢复报价</button>` : ""}
-    ${!pauseRequested && !resumePending && has("runtime:stop") ? `<button class="btn" data-runtime-action="pause" data-id="${esc(pair.id)}">暂停并撤单</button>` : ""}
+    ${pauseRequested && has("runtime:start") ? `<button class="btn primary" data-runtime-action="resume" data-id="${esc(pair.id)}">开启币对</button>` : ""}
+    ${!pauseRequested && !resumePending && has("runtime:stop") ? `<button class="btn" data-runtime-action="pause" data-id="${esc(pair.id)}">关闭币对</button>` : ""}
     ${has("runtime:emergency_cancel") ? `<button class="btn danger" data-runtime-action="emergency-cancel" data-id="${esc(pair.id)}">紧急暂停并撤单</button>` : ""}
     ${has("runtime:start") ? `<button class="btn" data-runtime-action="reconcile" data-id="${esc(pair.id)}">对账并解除阻断</button>` : ""}
   </div>`;
   return `
     <div class="runtime-detail-head"><div><span class="eyebrow">LIVE SNAPSHOT</span><h2>${esc(pair.base.symbol)}/${esc(pair.quote.symbol)} ${runtimeBadge(snapshot)}</h2><p>快照更新于 ${formatRelative(snapshot.updated_at)} · 总耗时 ${snapshot.tick_duration_ms || 0}ms · 链上 ${snapshot.reference_duration_ms || 0}ms · 余额 ${snapshot.balance_duration_ms || 0}ms</p></div>${controls}</div>
-    ${snapshot.pause ? `<div class="pause-notice"><span>Ⅱ</span><div><strong>${snapshot.paused ? "币对已暂停" : "暂停撤单指令处理中"}</strong><p>原因：${esc(snapshot.pause.reason)} · 请求时间 ${formatDate(snapshot.pause.requested_at)}</p></div></div>` : resumePending ? `<div class="pause-notice"><span>↻</span><div><strong>正在恢复报价</strong><p>等待引擎加载已发布配置并生成新的运行快照。</p></div></div>` : ""}
+    ${snapshot.pause ? `<div class="pause-notice"><span>Ⅱ</span><div><strong>${snapshot.paused ? "币对已暂停" : "暂停撤单指令处理中"}</strong><p>原因：${esc(snapshot.pause.reason)} · 请求时间 ${formatDate(snapshot.pause.requested_at)}</p></div></div>` : resumePending ? `<div class="pause-notice"><span>↻</span><div><strong>正在恢复报价</strong><p>等待引擎加载最新配置并生成新的运行快照。</p></div></div>` : ""}
     ${snapshot.error ? `<div class="runtime-error prominent">${esc(snapshot.error)}</div>` : ""}
     <div class="metrics runtime-metrics">
       ${metric("Pancake 指数价", reference?.price || "—", reference ? `${reference.confidence} · 区块 ${reference.block_number}` : "等待链上价格")}
@@ -514,17 +484,18 @@ function runtimeTab(pair) {
       ${metric("账户总库存", snapshot.inventory_available ? snapshot.inventory : "—", `目标 ${snapshot.target_inventory ?? pair.strategy.target_base}`)}
       ${metric("最大库存偏差", snapshot.max_base_deviation ?? pair.strategy.max_base_deviation, snapshot.mode === "live" ? "实盘风控" : "Shadow 观察")}
     </div>
-    ${(snapshot.venues || []).length ? `<div class="runtime-venue-stack">${snapshot.venues.map(runtimeVenuePanel).join("")}</div>` : emptyState("等待首个运行快照", "引擎成功加载已发布配置后，会写入指数价、盘口和账户数据。", "刷新", "refresh-runtime")}`;
+    ${(snapshot.venues || []).length ? `<div class="runtime-venue-stack">${snapshot.venues.map(runtimeVenuePanel).join("")}</div>` : emptyState("等待首个运行快照", "引擎成功加载最新配置后，会写入指数价、盘口和账户数据。", "刷新", "refresh-runtime")}`;
 }
 
 function runtimeVenuePanel(venue) {
   const book = venue.book;
   const budget = venue.budget;
   const rules = venue.rules;
-  const spread = book ? spreadBps(book.bid_price, book.ask_price) : null;
+  const bookState = bookDisplayState(book);
+  const spread = bookState.twoSided ? spreadBps(book.bid_price, book.ask_price) : null;
   return `<section class="panel runtime-venue">
     <div class="market-head"><div><span class="venue-logo">${esc(venue.type?.slice(0, 1).toUpperCase())}</span><div><h3>${esc(venue.name)} · ${esc(venue.symbol)}</h3><p>行情 ${connectionLabel(venue.market_connected)} · 账户 ${connectionLabel(venue.account_connected)} · 盘口 ${venue.book_duration_ms || 0}ms · 订单 ${venue.orders_duration_ms || 0}ms · 成交 ${venue.fills_duration_ms || 0}ms · OMS ${venue.oms_duration_ms || 0}ms</p></div></div><span class="state-badge ${venue.market_connected ? "success" : "danger-soft"}">${venue.trading_enabled ? "允许实盘" : "Shadow"}</span></div>
-    <div class="book-grid"><span><small>买一</small><b class="buy-text">${book?.bid_price || "—"}</b><i>${book?.bid_qty || "—"}</i></span><span><small>卖一</small><b class="sell-text">${book?.ask_price || "—"}</b><i>${book?.ask_qty || "—"}</i></span><span><small>盘口点差</small><b>${spread == null ? "—" : `${spread.toFixed(2)} bps`}</b><i>${book ? formatRelative(book.timestamp) : "无行情"}</i></span><span><small>${esc(venue.base_balance?.asset || "Base")} 库存</small><b>${venue.base_balance ? decimalAdd(venue.base_balance.free, venue.base_balance.locked) : "—"}</b><i>${venue.base_balance ? `可用 ${venue.base_balance.free}` : "未连接账户"}</i></span><span><small>${esc(venue.quote_balance?.asset || "Quote")} 余额</small><b>${venue.quote_balance ? decimalAdd(venue.quote_balance.free, venue.quote_balance.locked) : "—"}</b><i>${venue.quote_balance ? `可用 ${venue.quote_balance.free}` : "未连接账户"}</i></span>${rules ? `<span><small>交易所实时精度</small><b>${esc(rules.price_tick)} / ${esc(rules.quantity_step)}</b><i>价格 Tick / 数量 Step</i></span><span><small>交易所挂单上限</small><b>${rules.max_open_orders || "未公布"}</b><i>运行时自动同步</i></span>` : ""}${budget ? `<span><small>卖盘资金预算</small><b>${esc(budget.base_budget)}</b><i>目标需要 ${esc(budget.base_required)}${budget.base_limited ? " · 已裁剪" : ""}</i></span><span><small>买盘资金预算</small><b>${esc(budget.quote_budget)}</b><i>目标需要 ${esc(budget.quote_required)}${budget.quote_limited ? " · 已裁剪" : ""}</i></span><span><small>可执行目标订单</small><b>${esc(budget.eligible_orders)} / ${esc(budget.target_orders)}</b><i>余额预留 ${esc(budget.reserve_bps)} bps</i></span>` : ""}</div>
+    <div class="book-grid"><span><small>买一</small><b class="buy-text">${bookState.hasBid ? esc(book.bid_price) : "—"}</b><i>${bookState.hasBid ? esc(book.bid_qty) : "等待本系统铺单"}</i></span><span><small>卖一</small><b class="sell-text">${bookState.hasAsk ? esc(book.ask_price) : "—"}</b><i>${bookState.hasAsk ? esc(book.ask_qty) : "等待本系统铺单"}</i></span><span><small>盘口点差</small><b>${spread == null ? "—" : `${spread.toFixed(2)} bps`}</b><i>${esc(bookState.label)}</i></span><span><small>${esc(venue.base_balance?.asset || "Base")} 库存</small><b>${venue.base_balance ? decimalAdd(venue.base_balance.free, venue.base_balance.locked) : "—"}</b><i>${venue.base_balance ? `可用 ${venue.base_balance.free}` : "未连接账户"}</i></span><span><small>${esc(venue.quote_balance?.asset || "Quote")} 余额</small><b>${venue.quote_balance ? decimalAdd(venue.quote_balance.free, venue.quote_balance.locked) : "—"}</b><i>${venue.quote_balance ? `可用 ${venue.quote_balance.free}` : "未连接账户"}</i></span>${rules ? `<span><small>交易所实时精度</small><b>${esc(rules.price_tick)} / ${esc(rules.quantity_step)}</b><i>价格 Tick / 数量 Step</i></span><span><small>交易所挂单上限</small><b>${rules.max_open_orders || "未公布"}</b><i>运行时自动同步</i></span>` : ""}${budget ? `<span><small>卖盘资金预算</small><b>${esc(budget.base_budget)}</b><i>目标需要 ${esc(budget.base_required)}${budget.base_limited ? " · 已裁剪" : ""}</i></span><span><small>买盘资金预算</small><b>${esc(budget.quote_budget)}</b><i>目标需要 ${esc(budget.quote_required)}${budget.quote_limited ? " · 已裁剪" : ""}</i></span><span><small>可执行目标订单</small><b>${esc(budget.eligible_orders)} / ${esc(budget.target_orders)}</b><i>余额预留 ${esc(budget.reserve_bps)} bps</i></span>` : ""}</div>
     ${venue.fault && venue.fault.status !== "normal" ? `<div class="runtime-error">故障状态：${esc(venue.fault.status)} · ${esc(venue.fault.stage || "恢复检查")} · 连续失败 ${esc(venue.fault.consecutive_failures)} · 连续恢复 ${esc(venue.fault.consecutive_successes)}${venue.fault.orders_retained ? " · 原订单暂时保留" : ""}</div>` : ""}
     ${venue.error ? `<div class="runtime-error">${esc(venue.error)}</div>` : ""}
     <div class="runtime-tables">
@@ -678,7 +649,7 @@ function addMarketForm(pair) {
       ${plainField("最小下单金额", "min_notional", "5", true, "", "5")}
       <div class="field span-2"><label>交易账号凭证</label><select name="credential_id" id="market-credential"><option value="0">Shadow 暂不绑定</option>${credentialOptionHTML(available[0][1].type)}</select></div>
     </div>
-    <div class="form-actions"><span>实盘发布前必须绑定启用中的同类型凭证。</span><button class="btn primary" type="submit">添加市场</button></div>
+    <div class="form-actions"><span>实盘保存前必须绑定启用中的同类型凭证。</span><button class="btn primary" type="submit">添加市场</button></div>
   </form>`;
 }
 
@@ -699,7 +670,7 @@ function marketCard(pair, mapping, editable) {
       ${boundField("最大 Quote 占用（0=不限）", `${path}.max_quote_commitment`, market.max_quote_commitment ?? "0", "text", editable)}
       <div class="field span-2"><label>交易账号凭证</label><select data-path="${path}.credential_id" data-type="number" ${editable ? "" : "disabled"}><option value="0">Shadow 暂不绑定</option>${credentialOptionHTML(mapping.venue.type, market.credential_id)}</select><small>${credential ? `${esc(credential.name)} · ${credential.enabled ? "可用" : "已停用"}` : "实盘前必须绑定"}</small></div>
     </div>
-    <p class="muted-line">价格 Tick、数量 Step、最小金额和挂单上限会在候选版本预检时从交易所重新读取；后台填写值作为发布前基础校验及交易所未提供字段的兜底。</p>
+    <p class="muted-line">价格 Tick、数量 Step、最小金额和挂单上限会在保存时从交易所重新读取；后台填写值作为保存前基础校验及交易所未提供字段的兜底。</p>
   </article>`;
 }
 
@@ -729,7 +700,18 @@ function strategyTab(pair, index) {
         ${boundedNumberField("交易所/指数最大偏差（bps）", `${path}.max_venue_reference_deviation_bps`, strategy.max_venue_reference_deviation_bps ?? 0, editable, 0, 10000, "0 使用运行时安全默认值 500 bps")}
         ${boundedNumberField("交易所盘口最大点差（bps）", `${path}.max_venue_spread_bps`, strategy.max_venue_spread_bps ?? 0, editable, 0, 10000, "0 使用运行时安全默认值 1000 bps")}
       </div>
-      ${legacyOrderSize ? `<div class="inline-note warning">当前已发布配置仍使用旧版固定数量：每档 ${esc(strategy.order_size)} ${esc(pair.base?.symbol || "Base Token")}。填写上面的最小和最大金额后，才会切换为按 ${esc(quoteSymbol)} 金额自动换算数量。</div>` : `<div class="inline-note">每个买卖档位会在金额范围内生成稳定随机值，再按该档价格和交易所数量精度自动换算，不需要手工计算 Token 数量。交易所最小下单金额高于这里的最小值时，以交易所规则为准。</div>`}
+      ${legacyOrderSize ? `<div class="inline-note warning">当前配置仍使用旧版固定数量：每档 ${esc(strategy.order_size)} ${esc(pair.base?.symbol || "Base Token")}。填写上面的最小和最大金额后，才会切换为按 ${esc(quoteSymbol)} 金额自动换算数量。</div>` : `<div class="inline-note">每个买卖档位会在金额范围内生成稳定随机值，再按该档价格和交易所数量精度自动换算，不需要手工计算 Token 数量。交易所最小下单金额高于这里的最小值时，以交易所规则为准。</div>`}
+      <div class="section-heading compact-heading"><span>↻</span><div><h2>盘口渐进轮换</h2><p>指数价格不变时，只轮换少量到期档位；真实行情移动仍按重新报价阈值优先处理。</p></div></div>
+      <div class="form-grid">
+        ${boundedNumberField("轮换间隔（秒）", `${path}.quote_refresh_seconds`, strategy.quote_refresh_seconds ?? 45, editable, 10, 86400, "建议 45 秒；同一时间窗口内目标保持稳定")}
+        ${boundedNumberField("每轮轮换比例（bps）", `${path}.quote_refresh_ratio_bps`, strategy.quote_refresh_ratio_bps ?? 1000, editable, 1, 10000, "1000 表示每轮只处理约 10% 当前目标订单")}
+        ${boundedNumberField("最短挂单存活（秒）", `${path}.min_order_lifetime_seconds`, strategy.min_order_lifetime_seconds ?? 30, editable, 5, 86400, "新挂订单在此时间内不会因常规轮换再次撤掉")}
+        ${boundedNumberField("最长挂单存活（秒）", `${path}.max_order_lifetime_seconds`, strategy.max_order_lifetime_seconds ?? 300, editable, 10, 604800, "超过后按最老优先、分批轮换")}
+        ${boundedNumberField("价格扰动（Tick）", `${path}.price_jitter_ticks`, strategy.price_jitter_ticks ?? 2, editable, 1, 100, "只在原策略价格附近变化，并继续受 Post-Only 与价格偏差保护")}
+        ${boundedNumberField("最优档数量", `${path}.best_levels`, strategy.best_levels ?? Math.min(3, levels), editable, 1, Math.max(1, levels), "买卖两侧最靠近盘口的档位数量")}
+        ${boundedNumberField("最优档轮换间隔（秒）", `${path}.best_level_refresh_seconds`, strategy.best_level_refresh_seconds ?? 90, editable, 10, 86400, "不能短于普通轮换间隔，避免频繁丢失最优价排队位置")}
+      </div>
+      <div class="inline-note">系统只让到期档位进入撤挂队列，并优先保留其他深度。数量会在 ${esc(strategy.min_order_notional ?? 10)}～${esc(strategy.max_order_notional ?? 20)} ${esc(quoteSymbol)} 内重新生成，价格最多扰动 ${esc(strategy.price_jitter_ticks ?? 2)} 个 Tick；不会因为轮换一次撤空全部盘口。</div>
     </section>
     <aside class="panel guidance"><span class="guide-icon">↕</span><h3>报价说明</h3><p>半点差决定第一档距离指数价的位置；后续档位按档位间距向外展开。</p><code>买一 = 指数价 − 半点差</code><code>卖一 = 指数价 ＋ 半点差</code><code>数量 = 随机${esc(quoteSymbol)}金额 ÷ 该档价格</code><code>最外档距离 = ${esc(outermostSpread)} bps</code><p>同一档位的随机目标金额保持稳定，避免行情轮询导致无意义撤挂。每个市场目标 ${ordersPerMarket} 张订单；当前 ${enabledMarketCount} 个已启用市场合计 ${totalTargetOrders} 张。订单按每轮最多 20 张滚动撤挂，避免限频和整片盘口瞬间消失。</p></aside>
     <section class="panel form-panel span-2">
@@ -767,7 +749,7 @@ function tradeSimulationTab(pair, index) {
     </section>
     <aside class="panel guidance"><span class="guide-icon">SIM</span><h3>运行约束</h3><p>价格严格大于买一并小于卖一，再按交易所价格 Tick 对齐；数量按 Step、最小数量和最小金额校验。</p><code>bid &lt; 模拟价 &lt; ask</code><code>不会 PlaceOrder</code><p>如果价差中没有一个合法 Tick，本轮显示 skipped 并等待下一次盘口。</p></aside>
     <section class="panel span-2">
-      <div class="panel-head"><div><h2>近期内部模拟成交</h2><p>${snapshot?.enabled ? `状态 ${esc(snapshot.status || "waiting")} · 来源 ${esc(snapshot.source_venue || source)}` : "尚未启用或未发布"}</p></div></div>
+      <div class="panel-head"><div><h2>近期内部模拟成交</h2><p>${snapshot?.enabled ? `状态 ${esc(snapshot.status || "waiting")} · 来源 ${esc(snapshot.source_venue || source)}` : "尚未启用"}</p></div></div>
       ${snapshot?.error ? `<div class="runtime-error">${esc(snapshot.error)}</div>` : ""}
       ${simulatedFillsTable(snapshot?.fills || [])}
     </section>
@@ -870,7 +852,7 @@ function settingsPage() {
   const editable = has("config:edit") && state.user.all_instruments;
   const config = state.draft;
   return `<div class="content-grid">
-    <section class="config-flow-note span-3"><span class="guide-icon">↻</span><div><strong>这里修改的是全局运行草稿</strong><p>保存草稿只会写入数据库，不会改变当前交易引擎。确认所有币对、交易所、策略和 RPC 后，再统一发布全局版本。</p></div><div class="flow-steps"><span><b>1</b>编辑</span><i>→</i><span><b>2</b>保存全部草稿</span><i>→</i><span><b>3</b>发布全局版本</span></div></section>
+    <section class="config-flow-note span-3"><span class="guide-icon">↻</span><div><strong>改完点“保存”即刻生效</strong><p>保存会先校验再直接应用到正在运行的引擎：策略参数热更新、不重启；交易所/凭证等结构性改动只重建受影响的部分，其他币对照常报价。</p></div><div class="flow-steps"><span><b>1</b>编辑</span><i>→</i><span><b>2</b>保存</span><i>→</i><span><b>3</b>生效</span></div></section>
     <section class="panel form-panel span-2">
       <div class="section-heading"><span>01</span><div><h2>运行安全开关</h2><p>Shadow 不发送订单；实盘还需要服务器环境变量二次确认。</p></div></div>
       <div class="mode-selector">
@@ -1031,15 +1013,13 @@ function bind() {
   $("#password-modal") && ($("#password-modal").onclick = (event) => { if (event.target.id === "password-modal") closeOwnPasswordModal(); });
   $("#change-own-password") && ($("#change-own-password").onsubmit = changeOwnPassword);
   $("#save") && ($("#save").onclick = saveDraft);
-  $("#publish") && ($("#publish").onclick = requestPublish);
-  $("#publish-cancel") && ($("#publish-cancel").onclick = closePublishModal);
-  $("#publish-cancel-x") && ($("#publish-cancel-x").onclick = closePublishModal);
-  $("#publish-confirm") && ($("#publish-confirm").onclick = publishConfig);
-  $("#publish-modal") && ($("#publish-modal").onclick = (event) => { if (event.target.id === "publish-modal" && !state.ui.publishing) closePublishModal(); });
+  $("#confirm-ok") && ($("#confirm-ok").onclick = runControl);
+  $("#confirm-cancel") && ($("#confirm-cancel").onclick = () => { state.ui.confirm = null; render(); });
+  $("#confirm-modal") && ($("#confirm-modal").onclick = (event) => { if (event.target.id === "confirm-modal") { state.ui.confirm = null; render(); } });
   document.onkeydown = (event) => {
     if (event.key !== "Escape") return;
     if (state.ui.passwordModal) closeOwnPasswordModal();
-    else if (state.ui.publishModal && !state.ui.publishing) closePublishModal();
+    else if (state.ui.confirm) { state.ui.confirm = null; render(); }
   };
   $("#discard") && ($("#discard").onclick = () => loadConfig());
   $("#validation-close") && ($("#validation-close").onclick = () => { state.ui.validationIssues = []; render(); });
@@ -1263,7 +1243,7 @@ async function createPair(event) {
     base: { symbol: base, address: body.base_address.trim(), decimals: 18 },
     quote: { symbol: quote, address: body.quote_address.trim(), decimals: 18 },
     reference: { type: "pancake_v2", legs: [], twap_window_seconds: 60, max_spot_twap_deviation_bps: 200, stale_after_seconds: 20, allow_spot_during_warmup: state.draft.mode !== "live" },
-    strategy: { half_spread_bps: 50, level_spacing_bps: 25, levels: 20, min_order_notional: "10", max_order_notional: "20", reprice_threshold_bps: 10, balance_reserve_bps: 500, max_venue_reference_deviation_bps: 500, max_venue_spread_bps: 1000, target_base: "0", max_base_deviation: "100", inventory_skew_bps: 30 },
+    strategy: { half_spread_bps: 50, level_spacing_bps: 25, levels: 20, min_order_notional: "10", max_order_notional: "20", reprice_threshold_bps: 10, balance_reserve_bps: 500, max_venue_reference_deviation_bps: 500, max_venue_spread_bps: 1000, target_base: "0", max_base_deviation: "100", inventory_skew_bps: 30, quote_refresh_seconds: 45, quote_refresh_ratio_bps: 1000, min_order_lifetime_seconds: 30, max_order_lifetime_seconds: 300, price_jitter_ticks: 2, best_levels: 3, best_level_refresh_seconds: 90 },
     trade_simulation: { enabled: false, source_venue: "", min_quantity: "1", max_quantity: "10", min_interval_ms: 1000, max_interval_ms: 3000, buy_probability_bps: 5000, recent_limit: 50 },
   };
   state.draft.instruments.push(pair);
@@ -1365,69 +1345,24 @@ function removeVenue(name) {
 }
 
 async function saveDraft() {
-  try {
-    await api("/api/config/draft", { method: "PUT", body: JSON.stringify(state.draft) });
-    state.draft = await api("/api/config/draft");
-    state.dirty = false;
-    state.ui.safetyAdjustments = 0;
-    state.ui.validationIssues = [];
-    toast("全局草稿已保存；当前运行版本未改变");
-    render();
-  } catch (error) {
-    toast(error.message, true);
-  }
-}
-
-async function requestPublish() {
-  if (state.dirty) return toast("请先保存草稿", true);
-  if (!hasUnpublishedChanges()) return toast("当前草稿与运行版本一致，无需重复发布");
   const issues = configIssues();
   if (issues.length) {
     state.ui.validationIssues = issues;
     render();
-    return toast(`还有 ${issues.length} 项配置需要完善，已列出具体原因`, true);
+    return toast(`还有 ${issues.length} 项需要完善，已列出具体原因`, true);
   }
-  state.ui.validationIssues = [];
-  state.ui.publishModal = true;
-  state.ui.planLoading = true;
-  state.ui.publishPlan = null;
-  render();
   try {
-    state.ui.publishPlan = await api("/api/config/plan", { method: "POST" });
-    state.ui.planLoading = false;
-    render();
-  } catch (error) {
-    state.ui.planLoading = false;
-    state.ui.publishModal = false;
-    render();
-    toast(error.message, true);
-  }
-}
-
-function closePublishModal() {
-  if (state.ui.publishing) return;
-  state.ui.publishModal = false;
-  state.ui.publishPlan = null;
-  render();
-}
-
-async function publishConfig() {
-  state.ui.publishing = true;
-  render();
-  try {
-    state.active = await api("/api/config/publish", { method: "POST" });
-    state.draft = JSON.parse(JSON.stringify(state.active.config));
+    // Saving now takes effect immediately (the backend validates and activates
+    // atomically); refresh the live config so the UI reflects what is running.
+    await api("/api/config/draft", { method: "PUT", body: JSON.stringify(state.draft) });
+    state.draft = await api("/api/config/draft");
+    state.active = await api("/api/config/active").catch(() => state.active);
     state.dirty = false;
-    state.ui.publishModal = false;
-    state.ui.publishing = false;
-    state.ui.publishPlan = null;
     state.ui.safetyAdjustments = 0;
     state.ui.validationIssues = [];
-    toast(`已发布运行版本 v${state.active.version}`);
+    toast("已保存，立即生效");
     render();
   } catch (error) {
-    state.ui.publishing = false;
-    render();
     toast(error.message, true);
   }
 }
@@ -1517,17 +1452,32 @@ async function loadRuntime(redraw = true) {
   if (redraw) render();
 }
 
-async function controlRuntime(action, instrumentID) {
-  const messages = {
-    pause: `暂停 ${instrumentID} 后，引擎会停止铺单并撤销受管挂单。确定继续？`,
-    resume: `恢复 ${instrumentID} 报价？引擎将在下一轮使用已发布配置重新铺单。`,
-    "emergency-cancel": `紧急操作：立即暂停 ${instrumentID} 并撤销受管挂单。确定继续？`,
-    reconcile: `对 ${instrumentID} 执行安全撤单、订单对账并解除 OMS 阻断？`,
-  };
-  if (!confirm(messages[action])) return;
+function controlRuntime(action, instrumentID) {
+  const meta = {
+    pause: { title: `关闭 ${instrumentID}`, body: "停止铺新单；已挂出的订单继续留在盘口。重启后保持关闭。", label: "关闭币对", danger: false },
+    resume: { title: `开启 ${instrumentID}`, body: "引擎将在下一轮继续铺单。", label: "开启币对", danger: false },
+    "emergency-cancel": { title: `紧急暂停并撤单 ${instrumentID}`, body: "立即停止铺单，并撤销该币对的全部受管挂单。", label: "紧急撤单", danger: true },
+    reconcile: { title: `对账 ${instrumentID}`, body: "执行安全撤单、订单对账，并解除 OMS 阻断。", label: "开始对账", danger: false },
+  }[action];
+  if (!meta) return;
+  state.ui.confirm = { ...meta, action, instrumentID };
+  render();
+}
+
+async function runControl() {
+  const request = state.ui.confirm;
+  if (!request) return;
+  state.ui.confirm = null;
+  render();
   try {
-    await api(`/api/runtime/${encodeURIComponent(instrumentID)}/${action}`, { method: "POST" });
-    toast(action === "resume" ? "恢复指令已提交" : action === "reconcile" ? "对账解除指令已提交" : "暂停撤单指令已提交，等待引擎确认");
+    await api(`/api/runtime/${encodeURIComponent(request.instrumentID)}/${request.action}`, { method: "POST" });
+    const done = {
+      resume: "已开启，正在恢复铺单",
+      reconcile: "对账解除指令已提交",
+      pause: "已关闭：停止铺单，挂单保留",
+      "emergency-cancel": "紧急撤单指令已提交，等待引擎确认",
+    };
+    toast(done[request.action] || "指令已提交");
     await loadRuntime();
   } catch (error) {
     toast(error.message, true);
@@ -1661,6 +1611,20 @@ function pairIssues(pair) {
   if (!(Number.isInteger(balanceReserve) && balanceReserve >= 0 && balanceReserve <= 10000)) issues.push("余额预留必须为 0–10000 bps 的整数");
   if (!(Number(pair.strategy?.max_venue_reference_deviation_bps ?? 0) >= 0)) issues.push("交易所/指数最大偏差不能为负数");
   if (!(Number(pair.strategy?.max_venue_spread_bps ?? 0) >= 0)) issues.push("交易所盘口最大点差不能为负数");
+  const refreshSeconds = Number(pair.strategy?.quote_refresh_seconds ?? 45);
+  const refreshRatio = Number(pair.strategy?.quote_refresh_ratio_bps ?? 1000);
+  const minLifetime = Number(pair.strategy?.min_order_lifetime_seconds ?? 30);
+  const maxLifetime = Number(pair.strategy?.max_order_lifetime_seconds ?? 300);
+  const jitterTicks = Number(pair.strategy?.price_jitter_ticks ?? 2);
+  const bestLevels = Number(pair.strategy?.best_levels ?? Math.min(3, levels));
+  const bestRefreshSeconds = Number(pair.strategy?.best_level_refresh_seconds ?? 90);
+  if (!(Number.isInteger(refreshSeconds) && refreshSeconds >= 10)) issues.push("盘口轮换间隔不能小于 10 秒");
+  if (!(Number.isInteger(refreshRatio) && refreshRatio >= 1 && refreshRatio <= 10000)) issues.push("每轮轮换比例必须为 1–10000 bps");
+  if (!(Number.isInteger(minLifetime) && minLifetime >= 5)) issues.push("最短挂单存活不能小于 5 秒");
+  if (!(Number.isInteger(maxLifetime) && maxLifetime >= minLifetime)) issues.push("最长挂单存活不能小于最短挂单存活");
+  if (!(Number.isInteger(jitterTicks) && jitterTicks >= 1 && jitterTicks <= 100)) issues.push("价格扰动必须为 1–100 Tick");
+  if (!(Number.isInteger(bestLevels) && bestLevels >= 1 && bestLevels <= levels)) issues.push("最优档数量必须在总档数范围内");
+  if (!(Number.isInteger(bestRefreshSeconds) && bestRefreshSeconds >= refreshSeconds)) issues.push("最优档轮换间隔不能短于普通轮换间隔");
   const markets = marketsForPair(pair.id);
   const enabledMarkets = markets.filter((item) => item.venue.enabled);
   if (!enabledMarkets.length) issues.push("至少绑定一个已启用的交易市场");
@@ -1766,6 +1730,20 @@ function spreadBps(bid, ask) {
   const askValue = Number(ask);
   if (!(bidValue > 0) || !(askValue > bidValue)) return null;
   return ((askValue - bidValue) / ((askValue + bidValue) / 2)) * 10000;
+}
+
+function bookDisplayState(book) {
+  const hasBid = isPositiveDecimal(book?.bid_price);
+  const hasAsk = isPositiveDecimal(book?.ask_price);
+  if (!book) return { hasBid, hasAsk, twoSided: false, label: "盘口接口不可用 · 按指数价铺单" };
+  if (!hasBid && !hasAsk) return { hasBid, hasAsk, twoSided: false, label: "空盘口 · 按指数价铺单" };
+  if (!hasBid || !hasAsk) return { hasBid, hasAsk, twoSided: false, label: "单边盘口 · 按指数价补单" };
+  return { hasBid, hasAsk, twoSided: true, label: formatRelative(book.timestamp) };
+}
+
+function isPositiveDecimal(value) {
+  const parts = positiveDecimalParts(value);
+  return Boolean(parts && /[1-9]/.test(parts.integer + parts.fraction));
 }
 
 function decimalAdd(left, right) {

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,6 +37,14 @@ type Result struct {
 	Canceled int `json:"canceled"`
 	Placed   int `json:"placed"`
 	Pending  int `json:"pending"`
+}
+
+// RefreshPolicy applies only to small, near-price maintenance changes. A
+// material price move remains urgent and can use the normal mutation batch.
+type RefreshPolicy struct {
+	MinOrderAge          time.Duration
+	MaxOrderAge          time.Duration
+	MaxRefreshesPerCycle int
 }
 
 type pendingCreate struct {
@@ -100,6 +109,10 @@ func (r *Reconciler) ReconcileWithOrders(ctx context.Context, client venue.Clien
 }
 
 func (r *Reconciler) ReconcileWithOrdersGuarded(ctx context.Context, client venue.Client, instrumentID string, quotes []domain.Quote, repriceThresholdBPS int, orders []domain.Order, guard WriteGuard, fenceGeneration uint64) (Result, error) {
+	return r.ReconcileWithOrdersGuardedPolicy(ctx, client, instrumentID, quotes, repriceThresholdBPS, orders, guard, fenceGeneration, RefreshPolicy{})
+}
+
+func (r *Reconciler) ReconcileWithOrdersGuardedPolicy(ctx context.Context, client venue.Client, instrumentID string, quotes []domain.Quote, repriceThresholdBPS int, orders []domain.Order, guard WriteGuard, fenceGeneration uint64, refresh RefreshPolicy) (Result, error) {
 	key := stateKey(client, instrumentID)
 	if err := r.ensureLoaded(ctx, key); err != nil {
 		return Result{}, fmt.Errorf("load OMS state: %w", err)
@@ -143,7 +156,39 @@ func (r *Reconciler) ReconcileWithOrdersGuarded(ctx context.Context, client venu
 			}
 		}
 	}
+	scheduledRefresh := make(map[int]bool)
+	refreshCount := 0
+	if refresh.MaxRefreshesPerCycle > 0 && refresh.MaxOrderAge > 0 {
+		expired := make([]int, 0, len(managed))
+		for index, order := range managed {
+			if !order.CreatedAt.IsZero() && time.Since(order.CreatedAt) >= refresh.MaxOrderAge {
+				expired = append(expired, index)
+			}
+		}
+		sort.Slice(expired, func(i, j int) bool { return managed[expired[i]].CreatedAt.Before(managed[expired[j]].CreatedAt) })
+		for _, index := range expired {
+			if refreshCount >= refresh.MaxRefreshesPerCycle {
+				break
+			}
+			order := managed[index]
+			remaining := order.Quantity.Sub(order.ExecutedQty)
+			for quoteIndex, quote := range quotes {
+				if matchedQuotes[quoteIndex] || order.Side != quote.Side || remaining.Cmp(quote.Quantity) != 0 || !withinBPS(order.Price, quote.Price, repriceThresholdBPS) {
+					continue
+				}
+				// Reserve the target so a simultaneous vacancy cannot place a
+				// duplicate before this aged order is confirmed canceled.
+				matchedQuotes[quoteIndex] = true
+				scheduledRefresh[index] = true
+				refreshCount++
+				break
+			}
+		}
+	}
 	for i, order := range managed {
+		if scheduledRefresh[i] {
+			continue
+		}
 		// remaining is loop-invariant across quotes; compute it once per order
 		// instead of allocating a big.Rat subtraction on every pairing.
 		remaining := order.Quantity.Sub(order.ExecutedQty)
@@ -164,6 +209,31 @@ func (r *Reconciler) ReconcileWithOrdersGuarded(ctx context.Context, client venu
 			}
 		}
 	}
+	if refresh.MaxRefreshesPerCycle > 0 {
+		// Quantity and tiny jitter changes are routine refreshes, not urgent
+		// reprices. Pair them by side and nearby price, then rotate only the
+		// configured number. Young orders and overflow are temporarily kept.
+		for i, order := range managed {
+			if matchedOrders[i] || scheduledRefresh[i] || order.ExecutedQty.IsPositive() {
+				continue
+			}
+			for j, quote := range quotes {
+				if matchedQuotes[j] || order.Side != quote.Side || !withinBPS(order.Price, quote.Price, repriceThresholdBPS) {
+					continue
+				}
+				young := refresh.MinOrderAge > 0 && !order.CreatedAt.IsZero() && time.Since(order.CreatedAt) < refresh.MinOrderAge
+				matchedQuotes[j] = true
+				if young || refreshCount >= refresh.MaxRefreshesPerCycle {
+					matchedOrders[i] = true
+					result.Kept++
+				} else {
+					scheduledRefresh[i] = true
+					refreshCount++
+				}
+				break
+			}
+		}
+	}
 
 	// Fill confirmed vacancies before canceling another stale batch. During a
 	// large reprice this alternates cancel and place cycles, keeping most depth
@@ -177,13 +247,21 @@ func (r *Reconciler) ReconcileWithOrdersGuarded(ctx context.Context, client venu
 	// acknowledgement is asynchronous, so a later cycle must observe removal.
 	pendingCancel := make(map[string]struct{})
 	toCancel := make([]domain.Order, 0, maxOrderMutationsPerCycle)
+	// Materially stale orders are safety-sensitive and take priority over
+	// periodic maintenance refreshes.
 	for i, order := range managed {
-		if matchedOrders[i] || result.Canceled >= maxOrderMutationsPerCycle {
+		if matchedOrders[i] || scheduledRefresh[i] || len(toCancel) >= maxOrderMutationsPerCycle {
 			continue
 		}
 		toCancel = append(toCancel, order)
-		result.Canceled++
 	}
+	for i, order := range managed {
+		if !scheduledRefresh[i] || len(toCancel) >= maxOrderMutationsPerCycle {
+			continue
+		}
+		toCancel = append(toCancel, order)
+	}
+	result.Canceled = len(toCancel)
 	if result.Canceled > 0 {
 		if err := cancelOrders(ctx, client, symbol, toCancel, guard); err != nil {
 			r.block(ctx, key, fmt.Errorf("cancel order batch: %w", err))

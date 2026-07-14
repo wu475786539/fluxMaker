@@ -9,8 +9,17 @@ import (
 )
 
 func ValidateMarketReference(ref domain.ReferencePrice, book domain.Book, strategy config.StrategyConfig) error {
-	if !ref.Price.IsPositive() || !book.BidPrice.IsPositive() || !book.AskPrice.IsPositive() || book.BidPrice.Cmp(book.AskPrice) >= 0 {
-		return fmt.Errorf("invalid reference or venue book")
+	if !ref.Price.IsPositive() {
+		return fmt.Errorf("invalid reference price")
+	}
+	// An empty or one-sided book is a normal bootstrap state for a market maker.
+	// Without both sides there is no meaningful venue mid or spread to compare;
+	// the chain reference remains the sole pricing anchor.
+	if !book.TwoSided() {
+		return nil
+	}
+	if book.BidPrice.Cmp(book.AskPrice) >= 0 {
+		return fmt.Errorf("crossed venue book")
 	}
 	mid := book.BidPrice.Add(book.AskPrice).Div(num.FromInt64(2))
 	if strategy.MaxVenueReferenceDeviationBPS > 0 {

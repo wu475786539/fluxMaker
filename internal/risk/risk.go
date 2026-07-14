@@ -12,7 +12,7 @@ import (
 type Engine struct{}
 
 func (Engine) FilterQuotes(in config.InstrumentConfig, market config.VenueMarketConfig, book domain.Book, inventory num.Decimal, quotes []domain.Quote) ([]domain.Quote, error) {
-	if time.Since(book.Timestamp) > 30*time.Second {
+	if book.HasPrices() && (book.Timestamp.IsZero() || time.Since(book.Timestamp) > 30*time.Second) {
 		return nil, fmt.Errorf("venue book is stale")
 	}
 	deviation := inventory.Sub(in.Strategy.TargetBase)
@@ -21,10 +21,10 @@ func (Engine) FilterQuotes(in config.InstrumentConfig, market config.VenueMarket
 		if time.Now().After(q.ValidUntil) {
 			return nil, fmt.Errorf("quote reference expired")
 		}
-		if q.Side == domain.Buy && q.Price.Cmp(book.AskPrice) >= 0 {
+		if book.HasAsk() && q.Side == domain.Buy && q.Price.Cmp(book.AskPrice) >= 0 {
 			return nil, fmt.Errorf("buy quote would take liquidity")
 		}
-		if q.Side == domain.Sell && q.Price.Cmp(book.BidPrice) <= 0 {
+		if book.HasBid() && q.Side == domain.Sell && q.Price.Cmp(book.BidPrice) <= 0 {
 			return nil, fmt.Errorf("sell quote would take liquidity")
 		}
 		if q.Price.Mul(q.Quantity).Cmp(market.MinNotional) < 0 {

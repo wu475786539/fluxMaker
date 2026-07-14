@@ -13,11 +13,15 @@ import (
 type Generator struct{}
 
 func (Generator) Generate(in config.InstrumentConfig, venueName string, market config.VenueMarketConfig, ref domain.ReferencePrice, book domain.Book, inventory num.Decimal) ([]domain.Quote, error) {
+	return (Generator{}).GenerateAt(in, venueName, market, ref, book, inventory, time.Now().UTC())
+}
+
+func (Generator) GenerateAt(in config.InstrumentConfig, venueName string, market config.VenueMarketConfig, ref domain.ReferencePrice, book domain.Book, inventory num.Decimal, now time.Time) ([]domain.Quote, error) {
 	if !ref.Price.IsPositive() {
 		return nil, fmt.Errorf("reference price is not positive")
 	}
-	if book.BidPrice.Cmp(book.AskPrice) >= 0 {
-		return nil, fmt.Errorf("crossed or empty venue book")
+	if book.TwoSided() && book.BidPrice.Cmp(book.AskPrice) >= 0 {
+		return nil, fmt.Errorf("crossed venue book")
 	}
 	mid := applyInventorySkew(ref.Price, in.Strategy, inventory)
 	quotes := make([]domain.Quote, 0, in.Strategy.Levels*2)
@@ -27,16 +31,26 @@ func (Generator) Generate(in config.InstrumentConfig, venueName string, market c
 		spread := num.FromInt64(int64(spreadBPS)).Div(num.TenThousand())
 		bid := mid.Mul(num.One().Sub(spread)).QuantizeDown(market.PriceTick)
 		ask := mid.Mul(num.One().Add(spread)).QuantizeUp(market.PriceTick)
+		bidGeneration := refreshGeneration(in.Strategy, domain.Buy, level, now)
+		askGeneration := refreshGeneration(in.Strategy, domain.Sell, level, now)
+		bidJitterLimit := boundedJitterTicks(bid, market.PriceTick, in.Strategy.EffectivePriceJitterTicks(), in.Strategy.RepriceThresholdBPS)
+		askJitterLimit := boundedJitterTicks(ask, market.PriceTick, in.Strategy.EffectivePriceJitterTicks(), in.Strategy.RepriceThresholdBPS)
+		bid = applyPriceJitter(bid, market.PriceTick, stableJitterTicks(in.ID, venueName, market.Symbol, domain.Buy, level, bidGeneration, bidJitterLimit))
+		ask = applyPriceJitter(ask, market.PriceTick, stableJitterTicks(in.ID, venueName, market.Symbol, domain.Sell, level, askGeneration, askJitterLimit))
 
 		// A post-only bid must remain strictly below the best ask; the ask must
 		// remain strictly above the best bid.
-		maxBid := book.AskPrice.Sub(market.PriceTick)
-		if bid.Cmp(maxBid) > 0 {
-			bid = maxBid.QuantizeDown(market.PriceTick)
+		if book.HasAsk() {
+			maxBid := book.AskPrice.Sub(market.PriceTick)
+			if bid.Cmp(maxBid) > 0 {
+				bid = maxBid.QuantizeDown(market.PriceTick)
+			}
 		}
-		minAsk := book.BidPrice.Add(market.PriceTick)
-		if ask.Cmp(minAsk) < 0 {
-			ask = minAsk.QuantizeUp(market.PriceTick)
+		if book.HasBid() {
+			minAsk := book.BidPrice.Add(market.PriceTick)
+			if ask.Cmp(minAsk) < 0 {
+				ask = minAsk.QuantizeUp(market.PriceTick)
+			}
 		}
 		if level > 0 {
 			maxLevelBid := previousBid.Sub(market.PriceTick)
@@ -54,11 +68,11 @@ func (Generator) Generate(in config.InstrumentConfig, venueName string, market c
 		if bid.Cmp(ask) >= 0 {
 			return nil, fmt.Errorf("generated quotes cross")
 		}
-		bidQty, err := quoteQuantity(in, venueName, market, domain.Buy, level, bid)
+		bidQty, err := quoteQuantity(in, venueName, market, domain.Buy, level, bid, bidGeneration)
 		if err != nil {
 			return nil, fmt.Errorf("buy level %d: %w", level+1, err)
 		}
-		askQty, err := quoteQuantity(in, venueName, market, domain.Sell, level, ask)
+		askQty, err := quoteQuantity(in, venueName, market, domain.Sell, level, ask, askGeneration)
 		if err != nil {
 			return nil, fmt.Errorf("sell level %d: %w", level+1, err)
 		}
@@ -79,7 +93,7 @@ func (Generator) Generate(in config.InstrumentConfig, venueName string, market c
 // base quantity. The stable hash prevents each engine tick from producing new
 // random sizes, while the price bucket keeps quantities steady across small
 // price movements that remain inside the reprice threshold.
-func quoteQuantity(in config.InstrumentConfig, venueName string, market config.VenueMarketConfig, side domain.Side, level int, price num.Decimal) (num.Decimal, error) {
+func quoteQuantity(in config.InstrumentConfig, venueName string, market config.VenueMarketConfig, side domain.Side, level int, price num.Decimal, refreshGeneration int64) (num.Decimal, error) {
 	if !in.Strategy.UsesOrderNotionalRange() {
 		qty := in.Strategy.OrderSize.QuantizeDown(market.QuantityStep)
 		if !qty.IsPositive() {
@@ -109,7 +123,7 @@ func quoteQuantity(in config.InstrumentConfig, venueName string, market config.V
 		return num.Decimal{}, fmt.Errorf("notional range %s-%s cannot satisfy quantity step %s and exchange limits at price %s", minimum, maximum, market.QuantityStep, price)
 	}
 
-	target := stableOrderNotional(in.ID, venueName, market.Symbol, side, level, minimum, maximum)
+	target := stableOrderNotional(in.ID, venueName, market.Symbol, side, level, minimum, maximum, refreshGeneration)
 	anchor := stablePriceAnchor(price, market.PriceTick, in.Strategy.RepriceThresholdBPS)
 	quantity := target.Div(anchor).QuantizeDown(market.QuantityStep)
 	if quantity.Cmp(minimumQty) < 0 {
@@ -129,17 +143,78 @@ func quoteQuantity(in config.InstrumentConfig, venueName string, market config.V
 	return quantity, nil
 }
 
-func stableOrderNotional(instrumentID, venueName, symbol string, side domain.Side, level int, minimum, maximum num.Decimal) num.Decimal {
+func stableOrderNotional(instrumentID, venueName, symbol string, side domain.Side, level int, minimum, maximum num.Decimal, refreshGeneration int64) num.Decimal {
 	if minimum.Cmp(maximum) == 0 {
 		return minimum
 	}
 	hash := fnv.New64a()
-	_, _ = fmt.Fprintf(hash, "%s|%s|%s|%s|%d|%s|%s", instrumentID, venueName, symbol, side, level, minimum, maximum)
+	_, _ = fmt.Fprintf(hash, "%s|%s|%s|%s|%d|%s|%s|%d", instrumentID, venueName, symbol, side, level, minimum, maximum, refreshGeneration)
 	// Stay strictly inside the configured range so exchange-step rounding and
 	// small in-bucket price changes have room on both sides.
 	const buckets int64 = 1_000_000
 	fraction := num.FromInt64(int64(hash.Sum64()%uint64(buckets-1)) + 1).Div(num.FromInt64(buckets))
 	return minimum.Add(maximum.Sub(minimum).Mul(fraction))
+}
+
+func refreshGeneration(strategy config.StrategyConfig, side domain.Side, level int, now time.Time) int64 {
+	if strategy.QuoteRefreshSeconds <= 0 || now.IsZero() {
+		return 0
+	}
+	bestLevels := strategy.EffectiveBestLevels()
+	if level < bestLevels {
+		return now.Unix() / int64(strategy.EffectiveBestLevelRefreshSeconds())
+	}
+	deepLevels := strategy.Levels - bestLevels
+	if deepLevels <= 0 {
+		return now.Unix() / int64(strategy.EffectiveBestLevelRefreshSeconds())
+	}
+	refreshCount := (deepLevels*strategy.EffectiveQuoteRefreshRatioBPS() + 9_999) / 10_000
+	if refreshCount < 1 {
+		refreshCount = 1
+	}
+	groups := (deepLevels + refreshCount - 1) / refreshCount
+	deepIndex := level - bestLevels
+	if side == domain.Sell && deepLevels > 1 {
+		deepIndex = (deepIndex + deepLevels/2) % deepLevels
+	}
+	phase := deepIndex / refreshCount
+	window := now.Unix() / int64(strategy.EffectiveQuoteRefreshSeconds())
+	if window < int64(phase) {
+		return 0
+	}
+	return (window-int64(phase))/int64(groups) + 1
+}
+
+func stableJitterTicks(instrumentID, venueName, symbol string, side domain.Side, level int, generation int64, maxTicks int) int64 {
+	if generation == 0 || maxTicks <= 0 {
+		return 0
+	}
+	hash := fnv.New64a()
+	_, _ = fmt.Fprintf(hash, "%s|%s|%s|%s|%d|%d|jitter", instrumentID, venueName, symbol, side, level, generation)
+	width := uint64(maxTicks*2 + 1)
+	return int64(hash.Sum64()%width) - int64(maxTicks)
+}
+
+func applyPriceJitter(price, tick num.Decimal, ticks int64) num.Decimal {
+	if ticks == 0 {
+		return price
+	}
+	return price.Add(tick.Mul(num.FromInt64(ticks)))
+}
+
+func boundedJitterTicks(price, tick num.Decimal, configuredTicks, repriceThresholdBPS int) int {
+	if configuredTicks <= 0 || repriceThresholdBPS <= 0 || !price.IsPositive() || !tick.IsPositive() {
+		return 0
+	}
+	maximumMove := price.Mul(num.FromInt64(int64(repriceThresholdBPS))).Div(num.TenThousand())
+	for configuredTicks > 0 {
+		move := tick.Mul(num.FromInt64(int64(configuredTicks)))
+		if move.Cmp(maximumMove) <= 0 && move.Cmp(price) < 0 {
+			break
+		}
+		configuredTicks--
+	}
+	return configuredTicks
 }
 
 func stablePriceAnchor(price, tick num.Decimal, repriceThresholdBPS int) num.Decimal {

@@ -202,6 +202,48 @@ func TestQuoteNotionalRangeRemovesLegacySizeFromDraftAndSnapshot(t *testing.T) {
 	}
 }
 
+func TestSaveActiveAppliesImmediatelyAndValidates(t *testing.T) {
+	environment := setupIntegrationEnvironment(t)
+	ctx := context.Background()
+	store := configstore.New(environment.postgres, environment.redis)
+
+	cfg := validConfig(1500)
+	saved, err := store.SaveActive(ctx, cfg, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A save takes effect immediately: LoadActive returns exactly what was saved.
+	active, err := store.LoadActive(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active.Version != saved.Version || active.Config.PollIntervalMS != 1500 {
+		t.Fatalf("save did not take effect: active=%+v saved=%+v", active, saved)
+	}
+	// The draft mirrors the live config — there is no separate draft state.
+	draft, err := store.GetDraft(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draft.PollIntervalMS != 1500 {
+		t.Fatalf("draft not mirrored to active: %d", draft.PollIntervalMS)
+	}
+
+	// An invalid edit is rejected and must NOT change what is live.
+	bad := validConfig(9999)
+	bad.Instruments[0].Strategy.HalfSpreadBPS = -1
+	if _, err := store.SaveActive(ctx, bad, 0); err == nil {
+		t.Fatal("expected invalid configuration to be rejected on save")
+	}
+	stillActive, err := store.LoadActive(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillActive.Version != saved.Version || stillActive.Config.PollIntervalMS != 1500 {
+		t.Fatalf("a rejected edit leaked into the live config: %+v", stillActive)
+	}
+}
+
 func TestRedisRuntimeStateSurvivesStoreReplacementAndFencesOwners(t *testing.T) {
 	environment := setupIntegrationEnvironment(t)
 	ctx := context.Background()

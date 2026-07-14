@@ -77,6 +77,92 @@ type StrategyConfig struct {
 	TargetBase                    num.Decimal `json:"target_base"`
 	MaxBaseDeviation              num.Decimal `json:"max_base_deviation"`
 	InventorySkewBPS              int         `json:"inventory_skew_bps"`
+	QuoteRefreshSeconds           int         `json:"quote_refresh_seconds,omitempty"`
+	QuoteRefreshRatioBPS          int         `json:"quote_refresh_ratio_bps,omitempty"`
+	MinOrderLifetimeSeconds       int         `json:"min_order_lifetime_seconds,omitempty"`
+	MaxOrderLifetimeSeconds       int         `json:"max_order_lifetime_seconds,omitempty"`
+	PriceJitterTicks              int         `json:"price_jitter_ticks,omitempty"`
+	BestLevels                    int         `json:"best_levels,omitempty"`
+	BestLevelRefreshSeconds       int         `json:"best_level_refresh_seconds,omitempty"`
+}
+
+const (
+	DefaultQuoteRefreshSeconds     = 45
+	DefaultQuoteRefreshRatioBPS    = 1_000
+	DefaultMinOrderLifetimeSeconds = 30
+	DefaultMaxOrderLifetimeSeconds = 300
+	DefaultPriceJitterTicks        = 2
+	DefaultBestLevels              = 3
+	DefaultBestRefreshSeconds      = 90
+)
+
+func (s StrategyConfig) EffectiveQuoteRefreshSeconds() int {
+	if s.QuoteRefreshSeconds > 0 {
+		return s.QuoteRefreshSeconds
+	}
+	return DefaultQuoteRefreshSeconds
+}
+
+func (s StrategyConfig) EffectiveQuoteRefreshRatioBPS() int {
+	if s.QuoteRefreshRatioBPS > 0 {
+		return s.QuoteRefreshRatioBPS
+	}
+	return DefaultQuoteRefreshRatioBPS
+}
+
+func (s StrategyConfig) EffectiveMinOrderLifetime() time.Duration {
+	seconds := s.MinOrderLifetimeSeconds
+	if seconds <= 0 {
+		seconds = DefaultMinOrderLifetimeSeconds
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (s StrategyConfig) EffectiveMaxOrderLifetime() time.Duration {
+	seconds := s.MaxOrderLifetimeSeconds
+	if seconds <= 0 {
+		seconds = DefaultMaxOrderLifetimeSeconds
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (s StrategyConfig) EffectivePriceJitterTicks() int {
+	if s.PriceJitterTicks > 0 {
+		return s.PriceJitterTicks
+	}
+	return DefaultPriceJitterTicks
+}
+
+func (s StrategyConfig) EffectiveBestLevels() int {
+	levels := s.BestLevels
+	if levels <= 0 {
+		levels = DefaultBestLevels
+	}
+	if levels > s.Levels {
+		return s.Levels
+	}
+	return levels
+}
+
+func (s StrategyConfig) EffectiveBestLevelRefreshSeconds() int {
+	if s.BestLevelRefreshSeconds > 0 {
+		return s.BestLevelRefreshSeconds
+	}
+	return DefaultBestRefreshSeconds
+}
+
+func (s StrategyConfig) RefreshOrdersPerCycle(orderCount int) int {
+	if orderCount <= 0 {
+		return 0
+	}
+	count := (orderCount*s.EffectiveQuoteRefreshRatioBPS() + 9_999) / 10_000
+	if count < 1 {
+		return 1
+	}
+	if count > orderCount {
+		return orderCount
+	}
+	return count
 }
 
 // UsesOrderNotionalRange reports whether the strategy opted into quote-asset
@@ -95,6 +181,27 @@ func (c *Config) NormalizeStrategySizing() {
 		strategy := &c.Instruments[index].Strategy
 		if strategy.MinOrderNotional.IsPositive() && strategy.MaxOrderNotional.IsPositive() {
 			strategy.OrderSize = num.Decimal{}
+		}
+		if strategy.QuoteRefreshSeconds == 0 {
+			strategy.QuoteRefreshSeconds = DefaultQuoteRefreshSeconds
+		}
+		if strategy.QuoteRefreshRatioBPS == 0 {
+			strategy.QuoteRefreshRatioBPS = DefaultQuoteRefreshRatioBPS
+		}
+		if strategy.MinOrderLifetimeSeconds == 0 {
+			strategy.MinOrderLifetimeSeconds = DefaultMinOrderLifetimeSeconds
+		}
+		if strategy.MaxOrderLifetimeSeconds == 0 {
+			strategy.MaxOrderLifetimeSeconds = DefaultMaxOrderLifetimeSeconds
+		}
+		if strategy.PriceJitterTicks == 0 {
+			strategy.PriceJitterTicks = DefaultPriceJitterTicks
+		}
+		if strategy.BestLevels == 0 {
+			strategy.BestLevels = min(DefaultBestLevels, strategy.Levels)
+		}
+		if strategy.BestLevelRefreshSeconds == 0 {
+			strategy.BestLevelRefreshSeconds = max(DefaultBestRefreshSeconds, strategy.QuoteRefreshSeconds)
 		}
 	}
 }
@@ -256,6 +363,31 @@ func (c Config) Validate() error {
 		}
 		if in.Strategy.HalfSpreadBPS < 0 || in.Strategy.LevelSpacingBPS < 0 || in.Strategy.RepriceThresholdBPS < 0 {
 			return fmt.Errorf("instrument %s: spread, spacing and reprice threshold must not be negative", in.ID)
+		}
+		strategy := in.Strategy
+		if strategy.QuoteRefreshSeconds < 0 || (strategy.QuoteRefreshSeconds > 0 && strategy.QuoteRefreshSeconds < 10) {
+			return fmt.Errorf("instrument %s: quote refresh interval must be zero or at least 10 seconds", in.ID)
+		}
+		if strategy.QuoteRefreshRatioBPS < 0 || strategy.QuoteRefreshRatioBPS > 10_000 {
+			return fmt.Errorf("instrument %s: quote refresh ratio must be 0..10000 bps", in.ID)
+		}
+		if strategy.MinOrderLifetimeSeconds < 0 || (strategy.MinOrderLifetimeSeconds > 0 && strategy.MinOrderLifetimeSeconds < 5) {
+			return fmt.Errorf("instrument %s: minimum order lifetime must be zero or at least 5 seconds", in.ID)
+		}
+		if strategy.MaxOrderLifetimeSeconds < 0 || (strategy.MaxOrderLifetimeSeconds > 0 && strategy.MaxOrderLifetimeSeconds < 10) {
+			return fmt.Errorf("instrument %s: maximum order lifetime must be zero or at least 10 seconds", in.ID)
+		}
+		if strategy.EffectiveMaxOrderLifetime() < strategy.EffectiveMinOrderLifetime() {
+			return fmt.Errorf("instrument %s: maximum order lifetime must be greater than or equal to minimum order lifetime", in.ID)
+		}
+		if strategy.PriceJitterTicks < 0 || strategy.PriceJitterTicks > 100 {
+			return fmt.Errorf("instrument %s: price jitter must be 0..100 ticks", in.ID)
+		}
+		if strategy.BestLevels < 0 || strategy.BestLevels > strategy.Levels {
+			return fmt.Errorf("instrument %s: best levels must be 0..levels", in.ID)
+		}
+		if strategy.BestLevelRefreshSeconds < 0 || (strategy.BestLevelRefreshSeconds > 0 && strategy.BestLevelRefreshSeconds < strategy.EffectiveQuoteRefreshSeconds()) {
+			return fmt.Errorf("instrument %s: best-level refresh interval must not be shorter than the regular refresh interval", in.ID)
 		}
 		if in.Strategy.BalanceReserveBPS < 0 || in.Strategy.BalanceReserveBPS > 10_000 {
 			return fmt.Errorf("instrument %s: balance reserve must be 0..10000 bps", in.ID)

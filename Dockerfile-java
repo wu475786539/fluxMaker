@@ -1,0 +1,31 @@
+ARG DOCKER_MIRROR=m.daocloud.io/docker.io/library
+
+FROM ${DOCKER_MIRROR}/maven:3.9.9-eclipse-temurin-21-alpine AS build
+WORKDIR /src/java
+COPY java/pom.xml ./pom.xml
+COPY java/src ./src
+RUN mvn --batch-mode --errors -Dmaven.test.skip=true -Dmaven.wagon.http.retryHandler.count=5 package
+RUN mkdir -p /out/lib \
+    && cp /root/.m2/repository/com/fasterxml/jackson/core/jackson-annotations/2.17.2/*.jar /out/lib/ \
+    && cp /root/.m2/repository/com/fasterxml/jackson/core/jackson-core/2.17.2/*.jar /out/lib/ \
+    && cp /root/.m2/repository/com/fasterxml/jackson/core/jackson-databind/2.17.2/*.jar /out/lib/ \
+    && cp /root/.m2/repository/com/fasterxml/jackson/datatype/jackson-datatype-jsr310/2.17.2/*.jar /out/lib/ \
+    && cp /root/.m2/repository/org/postgresql/postgresql/42.7.5/*.jar /out/lib/ \
+    && cp /root/.m2/repository/org/bouncycastle/bcprov-jdk18on/1.78.1/*.jar /out/lib/
+
+FROM ${DOCKER_MIRROR}/maven:3.9.9-eclipse-temurin-21-alpine
+RUN addgroup -S fluxmaker \
+    && adduser -S -G fluxmaker -h /var/lib/fluxmaker fluxmaker \
+    && mkdir -p /var/lib/fluxmaker/audit /var/lib/fluxmaker/run /app/migrations /app/web \
+    && chown -R fluxmaker:fluxmaker /var/lib/fluxmaker
+COPY --from=build /src/java/target/fluxmaker-java.jar /app/fluxmaker-java.jar
+COPY --from=build /out/lib /app/lib
+COPY internal/database/migrations /app/migrations
+COPY internal/adminapi/web /app/web
+COPY java/docker/admin-api java/docker/fluxmaker java/docker/watchdog /usr/local/bin/
+RUN chmod 0755 /usr/local/bin/admin-api /usr/local/bin/fluxmaker /usr/local/bin/watchdog
+ENV MIGRATIONS_DIR=/app/migrations WEB_ROOT=/app/web
+ENTRYPOINT []
+USER fluxmaker
+WORKDIR /var/lib/fluxmaker
+CMD ["/usr/local/bin/fluxmaker"]

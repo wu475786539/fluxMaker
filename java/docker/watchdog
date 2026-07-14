@@ -1,0 +1,2 @@
+#!/bin/sh
+exec java ${JAVA_OPTS:-} -cp '/app/fluxmaker-java.jar:/app/lib/*' com.fluxmaker.app.WatchdogMain "$@"

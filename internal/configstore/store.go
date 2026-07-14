@@ -49,6 +49,7 @@ func (s *Store) GetDraft(ctx context.Context) (config.Config, error) {
 	if err := json.Unmarshal(payload, &cfg); err != nil {
 		return config.Config{}, err
 	}
+	cfg.NormalizeStrategySizing()
 	return cfg, nil
 }
 
@@ -118,6 +119,55 @@ func (s *Store) PublishDraft(ctx context.Context, userID int64) (Snapshot, error
 	return snapshot, nil
 }
 
+// SaveActive validates cfg and atomically makes it the live configuration in a
+// single transaction, mirroring it into the draft row so the draft always equals
+// what is running. This is the "edit takes effect immediately" path that
+// replaces the separate draft-then-publish steps. The versioned snapshot chain
+// is retained solely as an append-only audit/history trail (not surfaced as a
+// user-facing version), and the engine still picks the change up by content diff.
+func (s *Store) SaveActive(ctx context.Context, cfg config.Config, userID int64) (Snapshot, error) {
+	cfg.NormalizeStrategySizing()
+	if err := cfg.Validate(); err != nil {
+		return Snapshot{}, err
+	}
+	payload, err := json.Marshal(cfg)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(764223)`); err != nil {
+		return Snapshot{}, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO draft_configs(id,payload,updated_by,updated_at) VALUES(1,$1,$2,now()) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated_by=excluded.updated_by,updated_at=now()`, payload, nullableUser(userID)); err != nil {
+		return Snapshot{}, err
+	}
+	var version int64
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(version),0)+1 FROM config_snapshots`).Scan(&version); err != nil {
+		return Snapshot{}, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE config_snapshots SET active=FALSE WHERE active`); err != nil {
+		return Snapshot{}, err
+	}
+	var publishedAt time.Time
+	if err := tx.QueryRow(ctx, `INSERT INTO config_snapshots(version,payload,active,published_by) VALUES($1,$2,TRUE,$3) RETURNING published_at`, version, payload, nullableUser(userID)).Scan(&publishedAt); err != nil {
+		return Snapshot{}, err
+	}
+	details, _ := json.Marshal(map[string]any{"version": version})
+	if _, err := tx.Exec(ctx, `INSERT INTO audit_logs(user_id,action,resource_type,resource_id,details) VALUES($1,'config.save','config',$2,$3)`, nullableUser(userID), fmt.Sprint(version), details); err != nil {
+		return Snapshot{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Snapshot{}, err
+	}
+	snapshot := Snapshot{Version: version, Config: cfg, PublishedAt: publishedAt}
+	_ = s.cache(ctx, snapshot)
+	return snapshot, nil
+}
+
 func (s *Store) LoadActive(ctx context.Context) (Snapshot, error) {
 	if s.db == nil {
 		if cached, ok := s.cachedActive(ctx); ok {
@@ -155,6 +205,7 @@ func (s *Store) LoadActive(ctx context.Context) (Snapshot, error) {
 	if err := json.Unmarshal(payload, &snapshot.Config); err != nil {
 		return Snapshot{}, err
 	}
+	snapshot.Config.NormalizeStrategySizing()
 	if err := snapshot.Config.Validate(); err != nil {
 		return Snapshot{}, err
 	}
@@ -175,6 +226,7 @@ func (s *Store) LoadVersion(ctx context.Context, version int64) (Snapshot, error
 	if err := json.Unmarshal(payload, &snapshot.Config); err != nil {
 		return Snapshot{}, err
 	}
+	snapshot.Config.NormalizeStrategySizing()
 	if err := snapshot.Config.Validate(); err != nil {
 		return Snapshot{}, err
 	}
@@ -190,7 +242,11 @@ func (s *Store) cachedActive(ctx context.Context) (Snapshot, bool) {
 		return Snapshot{}, false
 	}
 	var snapshot Snapshot
-	if json.Unmarshal(raw, &snapshot) != nil || snapshot.Version <= 0 || snapshot.Config.Validate() != nil {
+	if json.Unmarshal(raw, &snapshot) != nil || snapshot.Version <= 0 {
+		return Snapshot{}, false
+	}
+	snapshot.Config.NormalizeStrategySizing()
+	if snapshot.Config.Validate() != nil {
 		return Snapshot{}, false
 	}
 	return snapshot, true

@@ -30,6 +30,17 @@ type Book struct {
 	Timestamp time.Time   `json:"timestamp"`
 }
 
+// HasBid and HasAsk distinguish a reachable but empty/one-sided market from a
+// transport failure. A market maker must be able to seed an empty book from its
+// external reference price; existing sides are only used to keep Post-Only
+// quotes from taking liquidity.
+func (b Book) HasBid() bool { return b.BidPrice.IsPositive() }
+func (b Book) HasAsk() bool { return b.AskPrice.IsPositive() }
+func (b Book) HasPrices() bool {
+	return b.HasBid() || b.HasAsk()
+}
+func (b Book) TwoSided() bool { return b.HasBid() && b.HasAsk() }
+
 type ReferencePrice struct {
 	InstrumentID string      `json:"instrument_id"`
 	Price        num.Decimal `json:"price"`

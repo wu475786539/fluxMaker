@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"fluxmaker/internal/app"
+	"fluxmaker/internal/config"
 	"fluxmaker/internal/configdiff"
 	"fluxmaker/internal/configstore"
 	"fluxmaker/internal/credentials"
@@ -73,6 +74,10 @@ func run(once bool, logger *slog.Logger) error {
 	var runtime *app.Runtime
 	var activeVersion int64
 	var desiredVersion int64
+	// activeRawConfig is the last applied configuration as published, before any
+	// exchange rule sync. Structural classification compares raw-to-raw so that
+	// runtime-synced venue rules do not masquerade as user changes.
+	var activeRawConfig config.Config
 	var pendingRuntime *app.Runtime
 	var pendingVersion int64
 	var pendingPlan configdiff.Plan
@@ -108,57 +113,78 @@ func run(once bool, logger *slog.Logger) error {
 			} else if snapshot.Version != activeVersion {
 				desiredVersion = snapshot.Version
 				updateHeartbeat()
-				logger.Info("applying published configuration", "version", snapshot.Version)
-				if pendingVersion != snapshot.Version || pendingRuntime == nil {
-					buildCtx, cancel := context.WithTimeout(ctx, maxDuration(snapshot.Config.RequestTimeout()*2, 15*time.Second))
-					newRuntime, buildErr := app.BuildRuntimeCandidate(buildCtx, snapshot.Config, credentialService, runtimeStore, logger, runtime)
-					cancel()
-					if buildErr != nil {
-						pendingRuntime = nil
-						pendingVersion = 0
-						logger.Error("published configuration rejected before switch", "version", snapshot.Version, "error", buildErr)
-						runtimeError = "version v" + fmt.Sprint(snapshot.Version) + " preparation failed: " + buildErr.Error()
-					} else {
-						pendingRuntime = newRuntime
-						pendingVersion = snapshot.Version
-						if runtime == nil {
-							pendingPlan = configdiff.Build(nil, pendingRuntime.Config)
+				hotPlan := configdiff.Build(&activeRawConfig, snapshot.Config)
+				if runtime != nil && !hotPlan.Structural {
+					// Only strategy/simulation/scalar tuning changed: hot-apply it
+					// in place. No rebuild, no rule re-sync, no preflight, so nothing
+					// unrelated (a warming TWAP, a slow venue) can block it.
+					runtime.Engine.ApplyParameters(snapshot.Config)
+					runtime.Config = runtime.Engine.EffectiveConfig()
+					activeVersion = snapshot.Version
+					activeRawConfig = snapshot.Config
+					pendingRuntime = nil
+					pendingVersion = 0
+					runtimeError = ""
+					nextRun = time.Time{}
+					if err := runtimeStore.SetAppliedVersion(ctx, activeVersion); err != nil {
+						logger.Error("persist applied runtime version failed", "version", activeVersion, "error", err)
+					}
+					updateHeartbeat()
+					logger.Info("parameters applied in place without rebuild", "version", snapshot.Version, "affected_instruments", hotPlan.AffectedInstruments)
+				} else {
+					logger.Info("applying published configuration", "version", snapshot.Version)
+					if pendingVersion != snapshot.Version || pendingRuntime == nil {
+						buildCtx, cancel := context.WithTimeout(ctx, maxDuration(snapshot.Config.RequestTimeout()*2, 15*time.Second))
+						newRuntime, buildErr := app.BuildRuntimeCandidate(buildCtx, snapshot.Config, credentialService, runtimeStore, logger, runtime)
+						cancel()
+						if buildErr != nil {
+							pendingRuntime = nil
+							pendingVersion = 0
+							logger.Error("published configuration rejected before switch", "version", snapshot.Version, "error", buildErr)
+							runtimeError = "version v" + fmt.Sprint(snapshot.Version) + " preparation failed: " + buildErr.Error()
 						} else {
-							pendingPlan = configdiff.Build(&runtime.Config, pendingRuntime.Config)
+							pendingRuntime = newRuntime
+							pendingVersion = snapshot.Version
+							if runtime == nil {
+								pendingPlan = configdiff.Build(nil, pendingRuntime.Config)
+							} else {
+								pendingPlan = configdiff.Build(&runtime.Config, pendingRuntime.Config)
+							}
 						}
 					}
-				}
-				if pendingRuntime != nil {
-					prepareCtx, cancel := context.WithTimeout(ctx, maxDuration(snapshot.Config.RequestTimeout()*4, 15*time.Second))
-					prepareErr := pendingRuntime.Prepare(prepareCtx)
-					cancel()
-					if prepareErr != nil {
-						runtimeError = "version v" + fmt.Sprint(snapshot.Version) + " preflight pending: " + prepareErr.Error()
-						logger.Warn("candidate configuration not ready; current version remains active", "version", snapshot.Version, "error", prepareErr)
-						if !strings.Contains(strings.ToLower(prepareErr.Error()), "twap warming") {
-							pendingRuntime = nil
-							pendingVersion = 0
-						}
-					} else {
-						cleanupCtx, cleanupCancel := context.WithTimeout(ctx, 20*time.Second)
-						cleanupErr := runtime.ApplyCleanup(cleanupCtx, pendingPlan)
-						cleanupCancel()
-						if cleanupErr != nil {
-							runtimeError = "version v" + fmt.Sprint(snapshot.Version) + " targeted cleanup failed: " + cleanupErr.Error()
-							logger.Error("candidate cleanup failed; current version remains active", "version", snapshot.Version, "error", cleanupErr)
-						} else {
-							runtime = pendingRuntime
-							activeVersion = snapshot.Version
-							if err := runtimeStore.SetAppliedVersion(ctx, activeVersion); err != nil {
-								logger.Error("persist applied runtime version failed", "version", activeVersion, "error", err)
+					if pendingRuntime != nil {
+						prepareCtx, cancel := context.WithTimeout(ctx, maxDuration(snapshot.Config.RequestTimeout()*4, 15*time.Second))
+						prepareErr := pendingRuntime.Prepare(prepareCtx)
+						cancel()
+						if prepareErr != nil {
+							runtimeError = "version v" + fmt.Sprint(snapshot.Version) + " preflight pending: " + prepareErr.Error()
+							logger.Warn("candidate configuration not ready; current version remains active", "version", snapshot.Version, "error", prepareErr)
+							if !strings.Contains(strings.ToLower(prepareErr.Error()), "twap warming") {
+								pendingRuntime = nil
+								pendingVersion = 0
 							}
-							pendingRuntime = nil
-							pendingVersion = 0
-							runtimeError = ""
-							nextRun = time.Time{}
-							nextRulesRefresh = time.Now().Add(time.Duration(runtime.Config.RulesRefreshSeconds) * time.Second)
-							nextBlockedRetry = time.Now().Add(30 * time.Second)
-							logger.Info("published configuration applied incrementally", "version", snapshot.Version, "affected_instruments", pendingPlan.AffectedInstruments, "cancel_targets", len(pendingPlan.CancelTargets), "cancel_all", pendingPlan.CancelAll, "blocked_instruments", runtime.Engine.BlockedInstruments())
+						} else {
+							cleanupCtx, cleanupCancel := context.WithTimeout(ctx, 20*time.Second)
+							cleanupErr := runtime.ApplyCleanup(cleanupCtx, pendingPlan)
+							cleanupCancel()
+							if cleanupErr != nil {
+								runtimeError = "version v" + fmt.Sprint(snapshot.Version) + " targeted cleanup failed: " + cleanupErr.Error()
+								logger.Error("candidate cleanup failed; current version remains active", "version", snapshot.Version, "error", cleanupErr)
+							} else {
+								runtime = pendingRuntime
+								activeVersion = snapshot.Version
+								activeRawConfig = snapshot.Config
+								if err := runtimeStore.SetAppliedVersion(ctx, activeVersion); err != nil {
+									logger.Error("persist applied runtime version failed", "version", activeVersion, "error", err)
+								}
+								pendingRuntime = nil
+								pendingVersion = 0
+								runtimeError = ""
+								nextRun = time.Time{}
+								nextRulesRefresh = time.Now().Add(time.Duration(runtime.Config.RulesRefreshSeconds) * time.Second)
+								nextBlockedRetry = time.Now().Add(30 * time.Second)
+								logger.Info("published configuration applied incrementally", "version", snapshot.Version, "affected_instruments", pendingPlan.AffectedInstruments, "cancel_targets", len(pendingPlan.CancelTargets), "cancel_all", pendingPlan.CancelAll, "blocked_instruments", runtime.Engine.BlockedInstruments())
+							}
 						}
 					}
 				}

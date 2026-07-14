@@ -26,3 +26,17 @@ func TestInventoryLimitKeepsReducingSide(t *testing.T) {
 		t.Fatalf("filtered=%+v", filtered)
 	}
 }
+
+func TestFilterQuotesAllowsEmptyBookBootstrap(t *testing.T) {
+	in := config.InstrumentConfig{Strategy: config.StrategyConfig{TargetBase: num.Must("10")}}
+	market := config.VenueMarketConfig{MinNotional: num.Must("1")}
+	valid := time.Now().Add(time.Minute)
+	quotes := []domain.Quote{
+		{Side: domain.Buy, Price: num.Must("99.5"), Quantity: num.Must("1"), ValidUntil: valid},
+		{Side: domain.Sell, Price: num.Must("100.5"), Quantity: num.Must("1"), ValidUntil: valid},
+	}
+	filtered, err := (Engine{}).FilterQuotes(in, market, domain.Book{}, num.Must("10"), quotes)
+	if err != nil || len(filtered) != 2 {
+		t.Fatalf("filtered=%+v err=%v", filtered, err)
+	}
+}

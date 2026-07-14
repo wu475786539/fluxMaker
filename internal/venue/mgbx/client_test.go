@@ -3,14 +3,65 @@ package mgbx
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
 	"fluxmaker/internal/num"
 )
+
+func TestBalanceSignsOfficialEmptyParameterPayload(t *testing.T) {
+	const secret = "correct-secret"
+	c := New("mgbx", "https://api.invalid", "correct-key", secret, time.Second)
+	c.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		timestamp := r.Header.Get("X-Request-Timestamp")
+		if timestamp == "" {
+			t.Fatal("missing request timestamp")
+		}
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write([]byte("&timestamp=" + timestamp))
+		wantSignature := hex.EncodeToString(mac.Sum(nil))
+		if got := r.Header.Get("X-Signature"); got != wantSignature {
+			t.Fatalf("signature=%s want=%s", got, wantSignature)
+		}
+		if r.URL.RawQuery != "" {
+			t.Fatalf("balance request query=%q want empty", r.URL.RawQuery)
+		}
+		if r.Header.Get("X-Access-Key") != "correct-key" || r.Header.Get("X-Request-Nonce") == "" {
+			t.Fatal("missing authentication headers")
+		}
+		body := `{"code":0,"msg":"success","data":[{"coin":"USDT","balance":"100","freeze":"0","availableBalance":"100"}]}`
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString(body)), Header: make(http.Header)}, nil
+	})
+	balances, err := c.Balances(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(balances) != 1 || balances[0].Asset != "USDT" || balances[0].Free.Cmp(num.Must("100")) != 0 {
+		t.Fatalf("balances=%+v", balances)
+	}
+}
+
+func TestSignaturePayloadSortsRawValuesWithoutQueryEscaping(t *testing.T) {
+	values := url.Values{
+		"note":         []string{"maker orders"},
+		"orderIdsJson": []string{`["647209581386256704","647209584552956224"]`},
+	}
+	want := `note=maker orders&orderIdsJson=["647209581386256704","647209584552956224"]&timestamp=123`
+	if got := signaturePayload(values, "123"); got != want {
+		t.Fatalf("payload=%q want=%q", got, want)
+	}
+	if encoded := values.Encode(); !strings.Contains(encoded, "%5B%22") || strings.Contains(signaturePayload(values, "123"), "%5B%22") {
+		t.Fatalf("URL encoding must be isolated from signing: encoded=%q signed=%q", encoded, signaturePayload(values, "123"))
+	}
+}
 
 func TestTopBookContract(t *testing.T) {
 	c := New("mgbx", "https://api.invalid", "", "", time.Second)
@@ -24,6 +75,35 @@ func TestTopBookContract(t *testing.T) {
 	}
 	if book.BidPrice.Cmp(num.Must("64004.38")) != 0 || book.AskPrice.Cmp(num.Must("64005.67")) != 0 {
 		t.Fatalf("book=%+v", book)
+	}
+}
+
+func TestTopBookAllowsEmptyAndOneSidedMarkets(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		wantBid string
+		wantAsk string
+	}{
+		{name: "empty", data: `{"t":1783832918247,"s":"GDT_USDT","b":[],"a":[]}`, wantBid: "0", wantAsk: "0"},
+		{name: "bid only", data: `{"t":1783832918247,"s":"GDT_USDT","b":[["0.35","10"]],"a":[]}`, wantBid: "0.35", wantAsk: "0"},
+		{name: "ask only", data: `{"t":1783832918247,"s":"GDT_USDT","b":[],"a":[["0.36","12"]]}`, wantBid: "0", wantAsk: "0.36"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := New("mgbx", "https://api.invalid", "", "", time.Second)
+			c.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				body := `{"code":0,"msg":"success","data":` + tt.data + `}`
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewBufferString(body)), Header: make(http.Header)}, nil
+			})
+			book, err := c.TopBook(context.Background(), "GDT_USDT")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if book.BidPrice.String() != tt.wantBid || book.AskPrice.String() != tt.wantAsk {
+				t.Fatalf("book=%+v want bid=%s ask=%s", book, tt.wantBid, tt.wantAsk)
+			}
+		})
 	}
 }
 

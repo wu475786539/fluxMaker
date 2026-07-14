@@ -534,3 +534,9 @@ h1, h2, h3, h4, p { margin-top: 0; }
   .runtime-actions { justify-content: flex-start; }
   .runtime-values, .book-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* Compact confirmation dialog (reuses .publish-modal chrome). */
+.confirm-modal { width: min(430px, 100%); }
+.confirm-modal .modal-head { grid-template-columns: 42px minmax(0, 1fr); }
+.confirm-modal .modal-head p { font-size: 13px; line-height: 1.5; }
+.modal-icon.danger { border-color: rgba(255, 130, 149, .28); background: rgba(255, 130, 149, .1); color: #ff8ca0; }

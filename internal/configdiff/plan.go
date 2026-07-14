@@ -22,8 +22,14 @@ type InstrumentChange struct {
 }
 
 type Plan struct {
-	FirstPublish         bool               `json:"first_publish"`
-	CancelAll            bool               `json:"cancel_all"`
+	FirstPublish bool `json:"first_publish"`
+	CancelAll    bool `json:"cancel_all"`
+	// Structural is true when applying this change requires rebuilding runtime
+	// wiring (venue clients, oracle, audit logger) or canceling orders — i.e. the
+	// slow candidate+preflight+swap path. When false the change only touches
+	// per-instrument strategy/simulation parameters or live scalar knobs, which
+	// the running engine can hot-apply in place between cycles.
+	Structural           bool               `json:"structural"`
 	HotChanges           []string           `json:"hot_changes"`
 	InstrumentChanges    []InstrumentChange `json:"instrument_changes"`
 	CancelTargets        []MarketTarget     `json:"cancel_targets"`
@@ -34,6 +40,7 @@ type Plan struct {
 func Build(previous *config.Config, next config.Config) Plan {
 	plan := Plan{FirstPublish: previous == nil, HotChanges: []string{}, InstrumentChanges: []InstrumentChange{}, CancelTargets: []MarketTarget{}}
 	if previous == nil {
+		plan.Structural = true
 		for _, instrument := range next.Instruments {
 			plan.InstrumentChanges = append(plan.InstrumentChanges, InstrumentChange{InstrumentID: instrument.ID, Action: "add", Reasons: []string{"新增币对"}})
 		}
@@ -65,18 +72,22 @@ func Build(previous *config.Config, next config.Config) Plan {
 	}
 	if old.AuditPath != next.AuditPath || old.AuditMaxBytes != next.AuditMaxBytes || old.AuditBackups != next.AuditBackups {
 		plan.HotChanges = append(plan.HotChanges, "审计文件与轮转")
+		plan.Structural = true // audit logger is wired at runtime construction
 	}
 	if old.HeartbeatPath != next.HeartbeatPath || old.WatchdogTimeoutSeconds != next.WatchdogTimeoutSeconds {
 		plan.HotChanges = append(plan.HotChanges, "Watchdog 与心跳参数")
+		plan.Structural = true
 	}
 	if !equalJSON(old.RPC, next.RPC) {
 		plan.HotChanges = append(plan.HotChanges, "BNB Chain RPC（验证后热切换）")
+		plan.Structural = true // needs a revalidated RPC client / oracle
 		for _, instrument := range next.Instruments {
 			addChange(instrument.ID, "hot_reload", "价格源连接发生变化")
 		}
 	}
 	if old.Mode != next.Mode {
 		plan.HotChanges = append(plan.HotChanges, "运行模式")
+		plan.Structural = true
 		for _, instrument := range next.Instruments {
 			addChange(instrument.ID, "reconfigure", "运行模式发生变化")
 		}
@@ -202,6 +213,17 @@ func addTarget(plan *Plan, target MarketTarget) {
 }
 
 func finish(plan *Plan, next config.Config) {
+	// Any order cancellation or a change beyond strategy/simulation parameters
+	// (reconfigure/add/remove) requires the full rebuild path.
+	if plan.CancelAll || len(plan.CancelTargets) > 0 {
+		plan.Structural = true
+	}
+	for _, change := range plan.InstrumentChanges {
+		if change.Action == "reconfigure" || change.Action == "add" || change.Action == "remove" {
+			plan.Structural = true
+			break
+		}
+	}
 	sort.Strings(plan.HotChanges)
 	sort.Slice(plan.InstrumentChanges, func(i, j int) bool {
 		return plan.InstrumentChanges[i].InstrumentID < plan.InstrumentChanges[j].InstrumentID

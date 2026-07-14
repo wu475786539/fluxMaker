@@ -234,6 +234,71 @@ func TestLargeBookConvergesInMutationBatches(t *testing.T) {
 	}
 }
 
+func TestRoutineRefreshIsLimitedPerCycle(t *testing.T) {
+	quotes := largeTarget(5, 0)
+	orders := make([]domain.Order, len(quotes))
+	for index, quote := range quotes {
+		orders[index] = domain.Order{OrderID: fmt.Sprint(index + 1), ClientID: "fm-old", Symbol: quote.Symbol, Side: quote.Side, Price: quote.Price, Quantity: num.Must("2"), State: domain.OrderNew, CreatedAt: time.Now().Add(-time.Minute)}
+	}
+	v := &fakeVenue{orders: orders}
+	result, err := New().ReconcileWithOrdersGuardedPolicy(context.Background(), v, "token_usdt", quotes, 10, orders, nil, 0, RefreshPolicy{MinOrderAge: 30 * time.Second, MaxOrderAge: 5 * time.Minute, MaxRefreshesPerCycle: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Canceled != 2 || result.Kept != 8 || len(v.orders) != 8 {
+		t.Fatalf("routine refresh result=%+v remaining=%d", result, len(v.orders))
+	}
+}
+
+func TestRoutineRefreshKeepsYoungOrders(t *testing.T) {
+	quotes := largeTarget(5, 0)
+	orders := make([]domain.Order, len(quotes))
+	for index, quote := range quotes {
+		orders[index] = domain.Order{OrderID: fmt.Sprint(index + 1), ClientID: "fm-young", Symbol: quote.Symbol, Side: quote.Side, Price: quote.Price, Quantity: num.Must("2"), State: domain.OrderNew, CreatedAt: time.Now()}
+	}
+	v := &fakeVenue{orders: orders}
+	result, err := New().ReconcileWithOrdersGuardedPolicy(context.Background(), v, "token_usdt", quotes, 10, orders, nil, 0, RefreshPolicy{MinOrderAge: 30 * time.Second, MaxOrderAge: 5 * time.Minute, MaxRefreshesPerCycle: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Canceled != 0 || result.Kept != len(orders) {
+		t.Fatalf("young refresh result=%+v", result)
+	}
+}
+
+func TestMaximumOrderAgeRefreshesOldestGradually(t *testing.T) {
+	quotes := largeTarget(5, 0)
+	orders := make([]domain.Order, len(quotes))
+	for index, quote := range quotes {
+		orders[index] = domain.Order{OrderID: fmt.Sprint(index + 1), ClientID: "fm-aged", Symbol: quote.Symbol, Side: quote.Side, Price: quote.Price, Quantity: quote.Quantity, State: domain.OrderNew, CreatedAt: time.Now().Add(-10*time.Minute - time.Duration(index)*time.Second)}
+	}
+	v := &fakeVenue{orders: orders}
+	result, err := New().ReconcileWithOrdersGuardedPolicy(context.Background(), v, "token_usdt", quotes, 10, orders, nil, 0, RefreshPolicy{MinOrderAge: 30 * time.Second, MaxOrderAge: 5 * time.Minute, MaxRefreshesPerCycle: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Canceled != 2 || result.Kept != 8 {
+		t.Fatalf("aged refresh result=%+v", result)
+	}
+}
+
+func TestMaterialRepriceIsNotLimitedByRefreshPolicy(t *testing.T) {
+	oldQuotes := largeTarget(5, 0)
+	newQuotes := largeTarget(5, 500)
+	orders := make([]domain.Order, len(oldQuotes))
+	for index, quote := range oldQuotes {
+		orders[index] = domain.Order{OrderID: fmt.Sprint(index + 1), ClientID: "fm-stale", Symbol: quote.Symbol, Side: quote.Side, Price: quote.Price, Quantity: quote.Quantity, State: domain.OrderNew, CreatedAt: time.Now().Add(-time.Minute)}
+	}
+	v := &fakeVenue{orders: orders}
+	result, err := New().ReconcileWithOrdersGuardedPolicy(context.Background(), v, "token_usdt", newQuotes, 10, orders, nil, 0, RefreshPolicy{MinOrderAge: 30 * time.Second, MaxOrderAge: 5 * time.Minute, MaxRefreshesPerCycle: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Canceled != len(orders) {
+		t.Fatalf("material reprice was throttled: result=%+v", result)
+	}
+}
+
 func TestWaitsForAsynchronousCancelConfirmation(t *testing.T) {
 	r := New()
 	v := &fakeVenue{}

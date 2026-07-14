@@ -6,6 +6,11 @@ x-default-logging: &default-logging
     max-size: "${LOG_MAX_SIZE:-20m}"
     max-file: "${LOG_MAX_FILES:-5}"
 
+x-backend-build: &backend-build
+  context: .
+  dockerfile: Dockerfile-${BACKEND_IMPL:-go}
+  network: host
+
 services:
   postgres:
     logging: *default-logging
@@ -44,8 +49,8 @@ services:
 
   admin-api:
     logging: *default-logging
-    build: .
-    image: fluxmaker:local
+    build: *backend-build
+    image: fluxmaker-${BACKEND_IMPL:-go}:local
     restart: unless-stopped
     command: ["/usr/local/bin/admin-api"]
     environment:
@@ -80,7 +85,8 @@ services:
 
   fluxmaker:
     logging: *default-logging
-    image: fluxmaker:local
+    build: *backend-build
+    image: fluxmaker-${BACKEND_IMPL:-go}:local
     restart: unless-stopped
     command: ["/usr/local/bin/fluxmaker"]
     environment: &runtime_environment
@@ -105,7 +111,8 @@ services:
 
   watchdog:
     logging: *default-logging
-    image: fluxmaker:local
+    build: *backend-build
+    image: fluxmaker-${BACKEND_IMPL:-go}:local
     restart: unless-stopped
     command: ["/usr/local/bin/watchdog"]
     environment: *runtime_environment

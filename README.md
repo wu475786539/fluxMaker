@@ -35,6 +35,14 @@ CREDENTIAL_MASTER_KEY
 METRICS_TOKEN
 ```
 
+后台实现由 `.env` 的一个开关统一选择，默认继续运行现有 Go 版本：
+
+```text
+BACKEND_IMPL=go
+```
+
+需要切到 Java 时改为 `BACKEND_IMPL=java` 后重新执行 `docker compose up -d --build`。`admin-api`、`fluxmaker` 和 `watchdog` 会整体切换，PostgreSQL、Redis、数据卷、端口和配置快照均不变；不要同时运行 Go 与 Java 交易引擎。
+
 密码不要使用示例内容。管理员密码至少 12 位。主加密密钥只生成一次：
 
 ```bash
@@ -98,6 +106,7 @@ http://服务器地址:8080
 - 配置仍以全局不可变快照发布，便于审计和回滚；但全局版本不再等于全量重启。策略变化只由 OMS 调整对应币对的不匹配订单，删除币对、停用市场或更换账号时只撤对应 `币对 × 交易所`，只有 Live→Shadow 和全局紧急停止才会全撤。
 - “运行监控”按币对展示 Pancake 指数价、各交易所买一卖一、账户库存、挂单、近期成交和行情/账户连接状态，每 3 秒刷新。
 - 每个币对支持 `1–100` 档双边报价；大深度订单按每个市场每轮最多 20 张滚动撤挂，避免单轮突发数百次 API 请求，重新定价时也不会一次撤空全部档位。
+- 做市报价以 Pancake TWAP/指数价为定价中心，不要求交易所预先存在买一和卖一。空盘口会直接按策略半点差铺出双边订单，单边盘口会补齐缺失方向；公共盘口接口暂时不可用时也不会阻断指数价报价。读取到已有对手盘时仍会作为 Post-Only 边界，避免主动吃单。
 - MGBX 未完成订单会按服务端 `total` 读取全部分页；普通重定价和安全撤单优先使用每批最多 20 张的原生批量撤单接口。
 - OMS 会记录已提交但尚未出现在挂单列表中的订单，先占用对应目标档位，并通过订单详情确认异步结果，防止重复下单；异步撤单超时会有限重试，连续失败后阻断该市场。
 - OMS 下单统一提交为每批最多 20 张的 Post-Only 请求：适配器实现安全的原生批量能力时调用一次批量接口，否则统一调度层逐笔回退；每个返回订单仍独立保存待确认状态和 fencing generation，部分成功不会被误判为整批成功。MGBX 批量创建文档未声明支持 `GTX`，确认前继续使用单笔 Post-Only 接口。
@@ -295,6 +304,7 @@ PostgreSQL 和 Redis 使用 Docker named volumes。PostgreSQL 仍是配置真源
 ```bash
 go test ./...
 go vet ./...
+mvn -f java/pom.xml test
 docker compose config --quiet
 make test-integration
 ```

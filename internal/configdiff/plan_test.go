@@ -36,6 +36,55 @@ func TestStrategyChangeDoesNotRequestGlobalOrMarketCancellation(t *testing.T) {
 	}
 }
 
+func TestStructuralClassification(t *testing.T) {
+	strategyOnly := testConfig()
+	strategyOnly.Instruments[0].Strategy.OrderSize = num.Must("2")
+
+	timingOnly := testConfig()
+	timingOnly.PollIntervalMS = 2500
+	timingOnly.MaxConcurrentInstruments = 8
+
+	rpcChange := testConfig()
+	rpcChange.RPC.URLs = []string{"https://rpc-b"}
+
+	modeChange := testConfig()
+	modeChange.Mode = domain.ModeShadow
+
+	symbolChange := testConfig()
+	venue := symbolChange.Venues["binance"]
+	market := venue.Markets["a"]
+	market.Symbol = "AXUSDT"
+	venue.Markets["a"] = market
+	symbolChange.Venues["binance"] = venue
+
+	removed := testConfig()
+	removed.Instruments = removed.Instruments[:1]
+
+	cases := []struct {
+		name       string
+		next       config.Config
+		structural bool
+	}{
+		{"strategy-param only", strategyOnly, false},
+		{"runtime timing only", timingOnly, false},
+		{"rpc change", rpcChange, true},
+		{"mode change", modeChange, true},
+		{"market symbol change", symbolChange, true},
+		{"instrument removed", removed, true},
+	}
+	for _, tc := range cases {
+		old := testConfig()
+		plan := Build(&old, tc.next)
+		if plan.Structural != tc.structural {
+			t.Errorf("%s: Structural=%v want %v (plan=%+v)", tc.name, plan.Structural, tc.structural, plan)
+		}
+	}
+
+	if !Build(nil, testConfig()).Structural {
+		t.Error("first publish must be structural")
+	}
+}
+
 func TestRPCChangeIsHotAndDoesNotCancelOrders(t *testing.T) {
 	old := testConfig()
 	next := testConfig()

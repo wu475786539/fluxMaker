@@ -43,7 +43,11 @@ func BuildRuntimeCandidate(ctx context.Context, cfg config.Config, credentialSer
 	if err != nil {
 		return nil, err
 	}
-	mergeInstrumentFailures(startupFailures, syncMarketRulesIsolated(ctx, &cfg, clients))
+	var previousConfig *config.Config
+	if previous != nil {
+		previousConfig = &previous.Config
+	}
+	mergeInstrumentFailures(startupFailures, syncMarketRulesIsolated(ctx, &cfg, clients, previousConfig))
 	if err := cfg.ValidateRuntime(); err != nil {
 		return nil, fmt.Errorf("validate synchronized trading rules: %w", err)
 	}
@@ -115,7 +119,7 @@ type marketRuleResult struct {
 	err          error
 }
 
-func syncMarketRulesIsolated(ctx context.Context, cfg *config.Config, clients map[string]venue.Client) map[string][]string {
+func syncMarketRulesIsolated(ctx context.Context, cfg *config.Config, clients map[string]venue.Client, previous *config.Config) map[string][]string {
 	resultCount := 0
 	for _, venueCfg := range cfg.Venues {
 		if venueCfg.Enabled {
@@ -129,6 +133,24 @@ func syncMarketRulesIsolated(ctx context.Context, cfg *config.Config, clients ma
 			continue
 		}
 		for instrumentID, market := range venueCfg.Markets {
+			// A market whose venue connection and symbol are unchanged from the
+			// previous runtime already has valid exchange-synced rules; reuse them
+			// instead of paying another exchange round-trip. The periodic rule
+			// refresh keeps them current, and only actually-changed markets hit the
+			// network — so editing one venue no longer re-syncs every market.
+			if reuse, ok := reusableMarketRules(previous, venueName, venueCfg, instrumentID, market); ok {
+				market.PriceTick = reuse.PriceTick
+				market.QuantityStep = reuse.QuantityStep
+				market.MinNotional = reuse.MinNotional
+				market.MinQuantity = reuse.MinQuantity
+				market.MaxQuantity = reuse.MaxQuantity
+				market.MaxNotional = reuse.MaxNotional
+				market.MinPrice = reuse.MinPrice
+				market.MaxPrice = reuse.MaxPrice
+				market.MaxOpenOrders = reuse.MaxOpenOrders
+				venueCfg.Markets[instrumentID] = market
+				continue
+			}
 			venueName, instrumentID, market := venueName, instrumentID, market
 			client := clients[venue.ClientKey(venueName, instrumentID)]
 			if client == nil {
@@ -191,6 +213,30 @@ func syncMarketRulesIsolated(ctx context.Context, cfg *config.Config, clients ma
 		cfg.Venues[result.venueName] = venueCfg
 	}
 	return failures
+}
+
+// reusableMarketRules reports whether a market's previously synced exchange
+// rules are still valid for the incoming configuration — i.e. the venue points
+// at the same exchange (type/environment/base URL) and the market trades the
+// same symbol, and the previous rules were actually synced. When true the
+// returned market carries the exchange-owned rule fields to copy forward.
+func reusableMarketRules(previous *config.Config, venueName string, venueCfg config.VenueConfig, instrumentID string, market config.VenueMarketConfig) (config.VenueMarketConfig, bool) {
+	if previous == nil {
+		return config.VenueMarketConfig{}, false
+	}
+	prevVenue, ok := previous.Venues[venueName]
+	if !ok || prevVenue.Type != venueCfg.Type || prevVenue.Environment != venueCfg.Environment || prevVenue.BaseURL != venueCfg.BaseURL {
+		return config.VenueMarketConfig{}, false
+	}
+	prevMarket, ok := prevVenue.Markets[instrumentID]
+	if !ok || prevMarket.Symbol != market.Symbol {
+		return config.VenueMarketConfig{}, false
+	}
+	// A positive price tick indicates rules were successfully synced before.
+	if !prevMarket.PriceTick.IsPositive() {
+		return config.VenueMarketConfig{}, false
+	}
+	return prevMarket, true
 }
 
 func mergeInstrumentFailures(target, source map[string][]string) {
