@@ -3,8 +3,15 @@ ARG DOCKER_MIRROR=m.daocloud.io/docker.io/library
 FROM ${DOCKER_MIRROR}/maven:3.9.9-eclipse-temurin-21-alpine AS build
 WORKDIR /src/java
 COPY java/pom.xml ./pom.xml
+COPY java/docker/maven-settings.xml /root/.m2/settings.xml
+RUN for attempt in 1 2 3 4 5; do \
+        mvn --batch-mode --errors -Dmaven.wagon.http.retryHandler.count=5 compiler:compile jar:jar && exit 0; \
+        if [ "$attempt" -eq 5 ]; then exit 1; fi; \
+        echo "Maven dependency download failed (attempt $attempt/5), retrying in 3 seconds..."; \
+        sleep 3; \
+    done
 COPY java/src ./src
-RUN mvn --batch-mode --errors -Dmaven.test.skip=true -Dmaven.wagon.http.retryHandler.count=5 package
+RUN mvn --batch-mode --errors --offline compiler:compile jar:jar
 RUN mkdir -p /out/lib \
     && cp /root/.m2/repository/com/fasterxml/jackson/core/jackson-annotations/2.17.2/*.jar /out/lib/ \
     && cp /root/.m2/repository/com/fasterxml/jackson/core/jackson-core/2.17.2/*.jar /out/lib/ \

@@ -320,6 +320,58 @@ func (c *Client) PlacePostOnly(ctx context.Context, request venue.PlaceRequest) 
 	return domain.Order{Venue: c.name, OrderID: orderID, Symbol: request.Symbol, Side: request.Side, Price: request.Price, Quantity: request.Quantity, State: domain.OrderUnknown, CreatedAt: time.Now().UTC()}, nil
 }
 
+// PlacePostOnlyBatch creates several post-only orders in a single signed request
+// via MGBX's batch endpoint. Implementing this makes venue.CapabilitiesOf derive
+// NativeBatchPlace=true, so the OMS submits the whole slice at once. Every order
+// carries timeInForce=GTX to preserve the maker-only guarantee exactly like
+// PlacePostOnly. Results keep request order; an item the exchange did not confirm
+// gets an empty OrderID so the OMS treats the batch as partially unknown and
+// reconciles it on the next cycle.
+func (c *Client) PlacePostOnlyBatch(ctx context.Context, requests []venue.PlaceRequest) ([]domain.Order, error) {
+	orders := make([]domain.Order, len(requests))
+	if len(requests) == 0 {
+		return orders, nil
+	}
+	type orderPayload struct {
+		Symbol      string `json:"symbol"`
+		Direction   string `json:"direction"`
+		TradeType   string `json:"tradeType"`
+		TotalAmount string `json:"totalAmount"`
+		Price       string `json:"price"`
+		TimeInForce string `json:"timeInForce"`
+	}
+	payload := make([]orderPayload, len(requests))
+	for i, request := range requests {
+		payload[i] = orderPayload{Symbol: request.Symbol, Direction: string(request.Side), TradeType: "LIMIT", TotalAmount: request.Quantity.String(), Price: request.Price.String(), TimeInForce: "GTX"}
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return orders, err
+	}
+	data, err := c.do(ctx, http.MethodPost, "/spot/v1/u/trade/order/batch/create", url.Values{"ordersJsonStr": []string{string(encoded)}}, true)
+	if err != nil {
+		return orders, err
+	}
+	var results []struct {
+		Code int             `json:"code"`
+		Msg  string          `json:"msg"`
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(data, &results); err != nil {
+		return orders, fmt.Errorf("decode MGBX batch order results: %w", err)
+	}
+	for i, request := range requests {
+		orders[i] = domain.Order{Venue: c.name, Symbol: request.Symbol, Side: request.Side, Price: request.Price, Quantity: request.Quantity, State: domain.OrderUnknown, CreatedAt: time.Now().UTC()}
+		if i < len(results) && results[i].Code == 0 {
+			var orderID string
+			if err := json.Unmarshal(results[i].Data, &orderID); err == nil {
+				orders[i].OrderID = orderID
+			}
+		}
+	}
+	return orders, nil
+}
+
 func (c *Client) CancelOrder(ctx context.Context, symbol, orderID string) error {
 	_, err := c.do(ctx, http.MethodPost, "/spot/v1/u/trade/order/cancel", url.Values{"orderId": []string{orderID}}, true)
 	return err

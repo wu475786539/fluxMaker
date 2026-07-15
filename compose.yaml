@@ -85,7 +85,8 @@ services:
 
   fluxmaker:
     logging: *default-logging
-    build: *backend-build
+    # Reuse the image built by admin-api so the classic builder does not race
+    # while tagging the same local image for three services.
     image: fluxmaker-${BACKEND_IMPL:-go}:local
     restart: unless-stopped
     command: ["/usr/local/bin/fluxmaker"]
@@ -111,7 +112,6 @@ services:
 
   watchdog:
     logging: *default-logging
-    build: *backend-build
     image: fluxmaker-${BACKEND_IMPL:-go}:local
     restart: unless-stopped
     command: ["/usr/local/bin/watchdog"]

@@ -313,3 +313,4 @@ make test-integration
 `make test-integration` 会在 PostgreSQL 中创建并自动删除独立 schema，同时只使用 Redis DB 15；不会修改当前发布配置、交易凭证、运行控制或 Redis DB 0。它覆盖配置缓存一致性、OMS/故障状态持久化、租约 fencing generation、角色变更后的会话即时失效，以及账户创建、启停、邮箱/角色更新、密码重置、强制下线和最后管理员保护。
 colima start
 docker-compose up -d --build
+docker-compose logs -f --tail=500 fluxmaker

@@ -13,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class VolumeSimulationPlannerImplTest {
-    @Test void selectsVaryingTickAlignedPricesStrictlyInsideTheBook() {
+    @Test void selectsVaryingSidesAndTickAlignedPricesIndependentlyOfSequence() {
         AppConfig.InstrumentConfig instrument = new AppConfig.InstrumentConfig();
         instrument.id = "gdt_usdt";
         instrument.tradeSimulation.minQuantity = DecimalValue.parse("30");
@@ -30,15 +30,19 @@ class VolumeSimulationPlannerImplTest {
 
         VolumeSimulationPlannerImpl planner = new VolumeSimulationPlannerImpl();
         Set<DecimalValue> prices = new HashSet<>();
-        for (long sequence = 1; sequence <= 50; sequence++) {
+        Set<Domain.Side> sides = new HashSet<>();
+        for (int attempt = 0; attempt < 50; attempt++) {
             VolumeSimulationPlanner.EventPlan plan = planner.plan(new VolumeSimulationPlanner.Request(
-                    instrument, "mgbx", market, book, Instant.EPOCH, sequence));
+                    instrument, "mgbx", market, book, Instant.EPOCH, 1));
             assertTrue(plan.price().compareTo(book.bidPrice) > 0);
             assertTrue(plan.price().compareTo(book.askPrice) < 0);
             assertEquals(plan.price(), plan.price().quantizeDown(market.priceTick));
             prices.add(plan.price());
+            sides.add(plan.side());
         }
 
         assertTrue(prices.size() > 1, "prices should vary across the legal ticks inside bid/ask");
+        assertEquals(Set.of(Domain.Side.BUY, Domain.Side.SELL), sides,
+                "side should be random instead of being derived from sequence");
     }
 }

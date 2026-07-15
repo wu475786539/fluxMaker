@@ -1,0 +1,28 @@
+services:
+  java-integration-tests:
+    image: maven:3.9-eclipse-temurin-21
+    working_dir: /src
+    command: ["mvn", "-Dtest=BatchPlaceIntegrationTest", "test"]
+    environment:
+      # Opt-in toggle + which venue type to exercise (defaults to mgbx).
+      FLUXMAKER_IT: "1"
+      FLUXMAKER_IT_VENUE: ${FLUXMAKER_IT_VENUE:-mgbx}
+      # Same connection the app uses; reaches postgres/redis by their compose
+      # service names, so no host port mapping is needed. The API secret stays
+      # encrypted in Postgres and is decrypted in-memory with the master key.
+      DATABASE_URL: postgres://fluxmaker:${POSTGRES_PASSWORD}@postgres:5432/fluxmaker?sslmode=disable
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      REDIS_DB: "0"
+      CREDENTIAL_MASTER_KEY: ${CREDENTIAL_MASTER_KEY:?set CREDENTIAL_MASTER_KEY in .env}
+    volumes:
+      - ./java:/src
+      - java_integration_m2:/root/.m2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  java_integration_m2:
