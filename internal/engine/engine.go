@@ -1197,14 +1197,14 @@ func (e *Engine) runInstrument(ctx context.Context, instrument config.Instrument
 		if instrument.TradeSimulation.Enabled && venueName == instrument.TradeSimulation.SourceVenue {
 			simulation, generated := e.tradeSimulator.Observe(instrument, venueName, market, book, time.Now().UTC())
 			snapshot.TradeSimulation = &simulation
-			for _, fill := range generated {
+			if generated != nil {
 				if publisher, ok := e.runtime.(SimulatedFillPublisher); ok {
-					if publishErr := publisher.AppendSimulatedFill(ctx, instrument.ID, fill); publishErr != nil {
+					if publishErr := publisher.AppendSimulatedFill(ctx, instrument.ID, *generated); publishErr != nil {
 						simulation.Error = appendError(simulation.Error, "publish stream: "+publishErr.Error())
 						snapshot.TradeSimulation = &simulation
 					}
 				}
-				_ = e.audit.Record("simulated_trade", map[string]any{"instrument": instrument.ID, "source_venue": venueName, "fill": fill})
+				_ = e.audit.Record("simulated_trade", map[string]any{"instrument": instrument.ID, "source_venue": venueName, "fill": generated})
 				e.metrics.recordSimulatedTrade()
 			}
 		}

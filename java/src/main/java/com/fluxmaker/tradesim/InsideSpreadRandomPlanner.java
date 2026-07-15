@@ -56,7 +56,7 @@ public final class InsideSpreadRandomPlanner implements VolumeSimulationPlanner 
             Domain.Side side = RANDOM.nextInt(10_000) < config.buyProbabilityBps
                     ? Domain.Side.BUY
                     : Domain.Side.SELL;
-            plans.add(new EventPlan(side, price, quantity));
+            plans.add(new EventPlan(side, price, quantity, null));
         }
         return plans;
     }

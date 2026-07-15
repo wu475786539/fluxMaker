@@ -218,7 +218,6 @@ type TradeSimulationConfig struct {
 	MaxIntervalMS     int         `json:"max_interval_ms"`
 	BuyProbabilityBPS int         `json:"buy_probability_bps"`
 	RecentLimit       int         `json:"recent_limit"`
-	BatchSize         int         `json:"batch_size"`
 }
 
 const MaxStrategyLevels = 100
@@ -419,9 +418,6 @@ func (c Config) Validate() error {
 			}
 			if sim.RecentLimit < 1 || sim.RecentLimit > 200 {
 				return fmt.Errorf("instrument %s: trade simulation recent limit must be 1..200", in.ID)
-			}
-			if sim.BatchSize < 1 || sim.BatchSize > 100 {
-				return fmt.Errorf("instrument %s: trade simulation batch size must be 1..100", in.ID)
 			}
 		}
 	}

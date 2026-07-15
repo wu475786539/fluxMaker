@@ -34,7 +34,7 @@ class VolumeSimulationPlannerImplTest {
         Set<DecimalValue> prices = new HashSet<>();
         for (long sequence = 1; sequence <= 50; sequence++) {
             List<VolumeSimulationPlanner.EventPlan> plans = planner.plan(new VolumeSimulationPlanner.Request(
-                    instrument, "mgbx", market, book, Instant.EPOCH, sequence));
+                    instrument, "mgbx", market, book, Instant.EPOCH, sequence, null));
             assertEquals(1, plans.size(), "batchSize=1 should return a single plan");
             VolumeSimulationPlanner.EventPlan plan = plans.get(0);
             assertTrue(plan.price().compareTo(book.bidPrice) > 0);
@@ -64,7 +64,7 @@ class VolumeSimulationPlannerImplTest {
 
         VolumeSimulationPlannerImpl planner = new VolumeSimulationPlannerImpl();
         List<VolumeSimulationPlanner.EventPlan> plans = planner.plan(new VolumeSimulationPlanner.Request(
-                instrument, "mgbx", market, book, Instant.EPOCH, 1));
+                instrument, "mgbx", market, book, Instant.EPOCH, 1, null));
 
         assertEquals(5, plans.size(), "batchSize=5 should return 5 plans");
         for (VolumeSimulationPlanner.EventPlan plan : plans) {
@@ -98,7 +98,7 @@ class VolumeSimulationPlannerImplTest {
 
         VolumeSimulationPlannerImpl planner = new VolumeSimulationPlannerImpl();
         List<VolumeSimulationPlanner.EventPlan> plans = planner.plan(new VolumeSimulationPlanner.Request(
-                instrument, "mgbx", market, book, Instant.EPOCH, 1));
+                instrument, "mgbx", market, book, Instant.EPOCH, 1, null));
 
         assertEquals(1, plans.size(), "batchSize=0 should default to 1 plan");
     }

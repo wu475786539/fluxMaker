@@ -3,6 +3,7 @@ package com.fluxmaker.tradesim;
 import com.fluxmaker.config.AppConfig;
 import com.fluxmaker.domain.Domain;
 import com.fluxmaker.math.DecimalValue;
+import com.fluxmaker.venue.VenueClient;
 
 import java.security.SecureRandom;
 import java.time.Instant;
@@ -15,9 +16,11 @@ import java.util.Objects;
 /**
  * Schedules and materializes internal volume-simulation events.
  *
- * <p>This boundary has no venue order client. A planner can only return
- * {@link VolumeSimulationPlanner.EventPlan} lists; this class always creates
- * {@link Domain.Fill} instances with {@code simulated=true}.
+ * <p>This boundary has no venue order client. A planner can return
+ * {@link VolumeSimulationPlanner.EventPlan} lists with optional real
+ * {@code orderId} fields. When {@code orderId} is present the fill is
+ * materialized as a real (non-simulated) fill; otherwise it is marked
+ * {@code simulated=true}.
  */
 public final class TradeSimulator {
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -57,7 +60,8 @@ public final class TradeSimulator {
             String venueName,
             AppConfig.VenueMarketConfig market,
             Domain.Book book,
-            Instant now
+            Instant now,
+            VenueClient venueClient
     ) {
         AppConfig.TradeSimulationConfig config = instrument.tradeSimulation;
         Snapshot snapshot = new Snapshot();
@@ -80,7 +84,7 @@ public final class TradeSimulator {
             try {
                 long baseSequence = state.sequence;
                 VolumeSimulationPlanner.Request request = new VolumeSimulationPlanner.Request(
-                        instrument, venueName, market, book, now, baseSequence + 1);
+                        instrument, venueName, market, book, now, baseSequence + 1, venueClient);
                 List<VolumeSimulationPlanner.EventPlan> plans = planner.plan(request);
                 List<Domain.Fill> fills = new ArrayList<>(plans.size());
                 for (int i = 0; i < plans.size(); i++) {
@@ -149,15 +153,19 @@ public final class TradeSimulator {
             throw new IllegalArgumentException("planned notional is below the market minimum");
         }
 
+        boolean isReal = plan.isReal();
         Domain.Fill fill = new Domain.Fill();
         fill.venue = venue;
-        fill.tradeId = "SIM-" + instrument.id + "-" + now.toEpochMilli() + "-" + sequence;
+        fill.tradeId = isReal
+                ? "REAL-" + instrument.id + "-" + now.toEpochMilli() + "-" + sequence
+                : "SIM-" + instrument.id + "-" + now.toEpochMilli() + "-" + sequence;
+        fill.orderId = isReal ? plan.orderId() : "";
         fill.symbol = market.symbol;
         fill.side = plan.side();
         fill.price = price;
         fill.quantity = quantity;
         fill.quoteQuantity = quoteQuantity;
-        fill.simulated = true;
+        fill.simulated = !isReal;
         fill.timestamp = now;
         return fill;
     }
