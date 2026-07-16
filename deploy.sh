@@ -159,7 +159,8 @@ REMOTE_ENV="$REMOTE_TMP/deploy.env"
 
 LOCAL_ARCHIVE="$(mktemp "${TMPDIR:-/tmp}/fluxmaker-source.XXXXXX")"
 log "打包当前代码（不包含 .git、.env、构建产物和运行数据）"
-tar -C "$PROJECT_ROOT" \
+# COPYFILE_DISABLE=1 阻止 macOS tar 生成 ._ AppleDouble 伴随文件。
+COPYFILE_DISABLE=1 tar -C "$PROJECT_ROOT" \
     --exclude='./.git' \
     --exclude='./.env' \
     --exclude='./.env.*' \
@@ -171,7 +172,8 @@ tar -C "$PROJECT_ROOT" \
     --exclude='./.codex' \
     --exclude='./.tmp' \
     --exclude='./configs' \
-    --exclude='./.DS_Store' \
+    --exclude='.DS_Store' \
+    --exclude='._*' \
     -czf "$LOCAL_ARCHIVE" .
 
 if command -v shasum >/dev/null 2>&1; then

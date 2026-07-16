@@ -419,7 +419,10 @@ func (e *Engine) Prepare(ctx context.Context) error {
 	e.preflightMu.Lock()
 	e.preflightBlocked = blocked
 	e.preflightMu.Unlock()
-	if ready > 0 {
+	// ready > 0: at least one instrument is runnable. No instruments at all: a
+	// valid idle configuration (nothing to prepare). Only fail when instruments
+	// exist but none of them could be prepared.
+	if ready > 0 || len(e.cfg.Instruments) == 0 {
 		return nil
 	}
 	failures := make([]string, 0, len(blocked))

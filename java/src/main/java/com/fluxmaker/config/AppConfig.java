@@ -236,7 +236,7 @@ public final class AppConfig {
         require(rpc != null && rpc.urls != null && !rpc.urls.isEmpty(), "at least one rpc url is required");
         require(rpc.chainId > 0, "rpc.chain_id must be positive");
         require(rpc.requestTimeoutMs > 0, "rpc.request_timeout_ms must be positive");
-        require(instruments != null && !instruments.isEmpty(), "at least one instrument is required");
+        require(instruments != null, "instruments list is required");  // 允许为空:0 币对是合法的空转配置,方便分步保存
 
         Set<String> seen = new java.util.HashSet<>();
         for (InstrumentConfig instrument : instruments) {
@@ -315,7 +315,9 @@ public final class AppConfig {
                 marketsByInstrument.merge(id, 1, Integer::sum);
             }
         }
-        require(enabledMarkets > 0, "at least one enabled venue market is required");
+        // Only needed once instruments exist (each pair still requires its own market
+        // below). With 0 instruments this is a valid idle config, so don't demand a market.
+        require(instruments.isEmpty() || enabledMarkets > 0, "at least one enabled venue market is required");
         for (InstrumentConfig instrument : instruments) {
             require(marketsByInstrument.getOrDefault(instrument.id, 0) > 0, "instrument " + instrument.id + " has no enabled venue market");
             if (instrument.tradeSimulation.enabled) {

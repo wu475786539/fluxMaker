@@ -338,3 +338,4 @@ make test-integration
 colima start
 docker-compose up -d --build
 docker-compose logs -f --tail=500 fluxmaker
+/opt/fluxmaker/current

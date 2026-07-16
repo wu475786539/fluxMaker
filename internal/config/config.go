@@ -305,9 +305,8 @@ func (c Config) Validate() error {
 	if c.RPC.RequestTimeoutMS <= 0 {
 		return fmt.Errorf("rpc.request_timeout_ms must be positive")
 	}
-	if len(c.Instruments) == 0 {
-		return fmt.Errorf("at least one instrument is required")
-	}
+	// An empty instrument list is a valid idle configuration; it lets the operator
+	// save RPC/venues/settings incrementally before creating any pair.
 	seen := map[string]bool{}
 	for _, in := range c.Instruments {
 		if strings.TrimSpace(in.ID) == "" || seen[in.ID] {
@@ -470,7 +469,9 @@ func (c Config) Validate() error {
 			marketsByInstrument[id]++
 		}
 	}
-	if enabledMarkets == 0 {
+	// Only required once instruments exist (each pair still requires its own market
+	// below). With no instruments this is a valid idle config.
+	if len(c.Instruments) > 0 && enabledMarkets == 0 {
 		return fmt.Errorf("at least one enabled venue market is required")
 	}
 	for _, in := range c.Instruments {

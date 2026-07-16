@@ -1702,7 +1702,7 @@ function configIssues() {
   if (!(state.draft.rpc?.urls || []).length) issues.push("系统：至少配置一个 BNB Chain RPC");
   if (!(Number(state.draft.rpc?.chain_id) > 0)) issues.push("系统：Chain ID 必须大于 0");
   if (!(Number(state.draft.rpc?.request_timeout_ms) > 0)) issues.push("系统：RPC 请求超时必须大于 0");
-  if (!(state.draft.instruments || []).length) issues.push("币对：至少创建一个币对");
+  // 允许保存 0 币对的配置(引擎空转),方便分步设置;有币对时才逐个校验。
   (state.draft.instruments || []).forEach((pair) => pairIssues(pair).forEach((issue) => issues.push(`${pair.base.symbol || pair.id}/${pair.quote.symbol || "?"}：${issue}`)));
   Object.entries(state.draft.venues || {}).forEach(([name, venue]) => {
     if (!venue.enabled) return;

@@ -101,7 +101,7 @@ public final class TradingEngine {
     public void prepare() {
         preflightBlocked.clear(); int ready = 0;
         for (AppConfig.InstrumentConfig instrument : config.instruments) try { withLocks(instrument.id, () -> prepareInstrument(instrument, startupFailures.get(instrument.id))); ready++; } catch (RuntimeException e) { preflightBlocked.put(instrument.id, e.getMessage()); }
-        if (ready == 0) throw new IllegalStateException("candidate preflight: no runnable instruments: " + preflightBlocked);
+        if (!config.instruments.isEmpty() && ready == 0) throw new IllegalStateException("candidate preflight: no runnable instruments: " + preflightBlocked);
     }
 
     private void prepareInstrument(AppConfig.InstrumentConfig instrument, String startupFailure) {
