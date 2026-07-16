@@ -19,6 +19,8 @@ public final class AppConfig {
     public static final int DEFAULT_QUOTE_REFRESH_RATIO_BPS = 1_000;
     public static final int DEFAULT_MIN_ORDER_LIFETIME_SECONDS = 30;
     public static final int DEFAULT_MAX_ORDER_LIFETIME_SECONDS = 300;
+    public static final int DEFAULT_FILL_REPLENISH_MIN_DELAY_SECONDS = 3;
+    public static final int DEFAULT_FILL_REPLENISH_MAX_DELAY_SECONDS = 8;
     public static final int DEFAULT_PRICE_JITTER_TICKS = 2;
     public static final int DEFAULT_BEST_LEVELS = 3;
     public static final int DEFAULT_BEST_REFRESH_SECONDS = 90;
@@ -98,6 +100,10 @@ public final class AppConfig {
         @JsonInclude(JsonInclude.Include.NON_DEFAULT)
         public int maxOrderLifetimeSeconds;
         @JsonInclude(JsonInclude.Include.NON_DEFAULT)
+        public int fillReplenishMinDelaySeconds;
+        @JsonInclude(JsonInclude.Include.NON_DEFAULT)
+        public int fillReplenishMaxDelaySeconds;
+        @JsonInclude(JsonInclude.Include.NON_DEFAULT)
         public int priceJitterTicks;
         @JsonInclude(JsonInclude.Include.NON_DEFAULT)
         public int bestLevels;
@@ -108,6 +114,8 @@ public final class AppConfig {
         public int effectiveQuoteRefreshRatioBps() { return quoteRefreshRatioBps > 0 ? quoteRefreshRatioBps : DEFAULT_QUOTE_REFRESH_RATIO_BPS; }
         public Duration effectiveMinOrderLifetime() { return Duration.ofSeconds(minOrderLifetimeSeconds > 0 ? minOrderLifetimeSeconds : DEFAULT_MIN_ORDER_LIFETIME_SECONDS); }
         public Duration effectiveMaxOrderLifetime() { return Duration.ofSeconds(maxOrderLifetimeSeconds > 0 ? maxOrderLifetimeSeconds : DEFAULT_MAX_ORDER_LIFETIME_SECONDS); }
+        public Duration effectiveFillReplenishMinDelay() { return Duration.ofSeconds(fillReplenishMinDelaySeconds > 0 ? fillReplenishMinDelaySeconds : DEFAULT_FILL_REPLENISH_MIN_DELAY_SECONDS); }
+        public Duration effectiveFillReplenishMaxDelay() { return Duration.ofSeconds(fillReplenishMaxDelaySeconds > 0 ? fillReplenishMaxDelaySeconds : DEFAULT_FILL_REPLENISH_MAX_DELAY_SECONDS); }
         public int effectivePriceJitterTicks() { return priceJitterTicks > 0 ? priceJitterTicks : DEFAULT_PRICE_JITTER_TICKS; }
         public int effectiveBestLevels() {
             int effective = bestLevels > 0 ? bestLevels : DEFAULT_BEST_LEVELS;
@@ -202,6 +210,8 @@ public final class AppConfig {
             if (strategy.quoteRefreshRatioBps == 0) strategy.quoteRefreshRatioBps = DEFAULT_QUOTE_REFRESH_RATIO_BPS;
             if (strategy.minOrderLifetimeSeconds == 0) strategy.minOrderLifetimeSeconds = DEFAULT_MIN_ORDER_LIFETIME_SECONDS;
             if (strategy.maxOrderLifetimeSeconds == 0) strategy.maxOrderLifetimeSeconds = DEFAULT_MAX_ORDER_LIFETIME_SECONDS;
+            if (strategy.fillReplenishMinDelaySeconds == 0) strategy.fillReplenishMinDelaySeconds = DEFAULT_FILL_REPLENISH_MIN_DELAY_SECONDS;
+            if (strategy.fillReplenishMaxDelaySeconds == 0) strategy.fillReplenishMaxDelaySeconds = DEFAULT_FILL_REPLENISH_MAX_DELAY_SECONDS;
             if (strategy.priceJitterTicks == 0) strategy.priceJitterTicks = DEFAULT_PRICE_JITTER_TICKS;
             if (strategy.bestLevels == 0) strategy.bestLevels = Math.min(DEFAULT_BEST_LEVELS, strategy.levels);
             if (strategy.bestLevelRefreshSeconds == 0) strategy.bestLevelRefreshSeconds = Math.max(DEFAULT_BEST_REFRESH_SECONDS, strategy.quoteRefreshSeconds);
@@ -268,6 +278,9 @@ public final class AppConfig {
             require(strategy.minOrderLifetimeSeconds >= 0 && (strategy.minOrderLifetimeSeconds == 0 || strategy.minOrderLifetimeSeconds >= 5), "instrument " + instrument.id + ": minimum order lifetime must be zero or at least 5 seconds");
             require(strategy.maxOrderLifetimeSeconds >= 0 && (strategy.maxOrderLifetimeSeconds == 0 || strategy.maxOrderLifetimeSeconds >= 10), "instrument " + instrument.id + ": maximum order lifetime must be zero or at least 10 seconds");
             require(strategy.effectiveMaxOrderLifetime().compareTo(strategy.effectiveMinOrderLifetime()) >= 0, "instrument " + instrument.id + ": maximum order lifetime must be greater than or equal to minimum order lifetime");
+            require(strategy.fillReplenishMinDelaySeconds >= 0 && strategy.fillReplenishMinDelaySeconds <= 3_600, "instrument " + instrument.id + ": minimum fill replenishment delay must be 0..3600 seconds");
+            require(strategy.fillReplenishMaxDelaySeconds >= 0 && strategy.fillReplenishMaxDelaySeconds <= 3_600, "instrument " + instrument.id + ": maximum fill replenishment delay must be 0..3600 seconds");
+            require(strategy.effectiveFillReplenishMaxDelay().compareTo(strategy.effectiveFillReplenishMinDelay()) >= 0, "instrument " + instrument.id + ": maximum fill replenishment delay must be greater than or equal to minimum fill replenishment delay");
             require(strategy.priceJitterTicks >= 0 && strategy.priceJitterTicks <= 100, "instrument " + instrument.id + ": price jitter must be 0..100 ticks");
             require(strategy.bestLevels >= 0 && strategy.bestLevels <= strategy.levels, "instrument " + instrument.id + ": best levels must be 0..levels");
             require(strategy.bestLevelRefreshSeconds >= 0 && (strategy.bestLevelRefreshSeconds == 0 || strategy.bestLevelRefreshSeconds >= strategy.effectiveQuoteRefreshSeconds()), "instrument " + instrument.id + ": best-level refresh interval must not be shorter than the regular refresh interval");

@@ -43,6 +43,8 @@ class AppConfigTest {
         assertEquals(AppConfig.DEFAULT_QUOTE_REFRESH_RATIO_BPS, strategy.quoteRefreshRatioBps);
         assertEquals(AppConfig.DEFAULT_MIN_ORDER_LIFETIME_SECONDS, strategy.minOrderLifetimeSeconds);
         assertEquals(AppConfig.DEFAULT_MAX_ORDER_LIFETIME_SECONDS, strategy.maxOrderLifetimeSeconds);
+        assertEquals(AppConfig.DEFAULT_FILL_REPLENISH_MIN_DELAY_SECONDS, strategy.fillReplenishMinDelaySeconds);
+        assertEquals(AppConfig.DEFAULT_FILL_REPLENISH_MAX_DELAY_SECONDS, strategy.fillReplenishMaxDelaySeconds);
         assertEquals(AppConfig.DEFAULT_PRICE_JITTER_TICKS, strategy.priceJitterTicks);
         assertEquals(2, strategy.bestLevels);
         assertEquals(AppConfig.DEFAULT_BEST_REFRESH_SECONDS, strategy.bestLevelRefreshSeconds);
@@ -70,6 +72,8 @@ class AppConfigTest {
         assertTrue(payload.contains("\"quote_refresh_seconds\":45"));
         assertTrue(payload.contains("\"quote_refresh_ratio_bps\":1000"));
         assertTrue(payload.contains("\"min_order_lifetime_seconds\":30"));
+        assertTrue(payload.contains("\"fill_replenish_min_delay_seconds\":3"));
+        assertTrue(payload.contains("\"fill_replenish_max_delay_seconds\":8"));
         assertTrue(payload.contains("\"best_level_refresh_seconds\":90"));
         AppConfig decoded = Json.read(payload, AppConfig.class);
         assertEquals(45, decoded.instruments.getFirst().strategy.quoteRefreshSeconds);

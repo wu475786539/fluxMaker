@@ -701,7 +701,7 @@ function strategyTab(pair, index) {
         ${boundedNumberField("交易所盘口最大点差（bps）", `${path}.max_venue_spread_bps`, strategy.max_venue_spread_bps ?? 0, editable, 0, 10000, "0 使用运行时安全默认值 1000 bps")}
       </div>
       ${legacyOrderSize ? `<div class="inline-note warning">当前配置仍使用旧版固定数量：每档 ${esc(strategy.order_size)} ${esc(pair.base?.symbol || "Base Token")}。填写上面的最小和最大金额后，才会切换为按 ${esc(quoteSymbol)} 金额自动换算数量。</div>` : `<div class="inline-note">每个买卖档位会在金额范围内生成稳定随机值，再按该档价格和交易所数量精度自动换算，不需要手工计算 Token 数量。交易所最小下单金额高于这里的最小值时，以交易所规则为准。</div>`}
-      <div class="section-heading compact-heading"><span>↻</span><div><h2>盘口渐进轮换</h2><p>指数价格不变时，只轮换少量到期档位；真实行情移动仍按重新报价阈值优先处理。</p></div>${editable ? `<button class="btn small danger rotation-preset" type="button" data-action="apply-aggressive-rotation">5 秒活跃轮换</button>` : ""}</div>
+      <div class="section-heading compact-heading"><span>↻</span><div><h2>盘口渐进轮换</h2><p>到期档位、普通行情变化和库存偏移都按配置比例逐步换单，避免整片盘口同时消失。</p></div>${editable ? `<button class="btn small danger rotation-preset" type="button" data-action="apply-aggressive-rotation">5 秒活跃轮换</button>` : ""}</div>
       <div class="form-grid">
         ${boundedNumberField("轮换间隔（秒）", `${path}.quote_refresh_seconds`, strategy.quote_refresh_seconds ?? 45, editable, 5, 86400, "最低 5 秒；同一时间窗口内目标保持稳定")}
         ${boundedNumberField("每轮轮换比例（bps）", `${path}.quote_refresh_ratio_bps`, strategy.quote_refresh_ratio_bps ?? 1000, editable, 1, 10000, "1000 表示每轮只处理约 10% 当前目标订单")}
@@ -713,6 +713,12 @@ function strategyTab(pair, index) {
       </div>
       <div class="inline-note">系统只让到期档位进入撤挂队列，并优先保留其他深度。数量会在 ${esc(strategy.min_order_notional ?? 10)}～${esc(strategy.max_order_notional ?? 20)} ${esc(quoteSymbol)} 内重新生成，价格最多扰动 ${esc(strategy.price_jitter_ticks ?? 2)} 个 Tick；不会因为轮换一次撤空全部盘口。</div>
       ${strategy.quote_refresh_seconds === 5 ? `<div class="inline-note warning">当前为高频活跃轮换：每 5 秒更新目标，撤单与重挂可能分属相邻引擎轮次，会显著增加交易所写接口调用。</div>` : ""}
+      <div class="section-heading compact-heading"><span>⌛</span><div><h2>成交缺口延迟补单</h2><p>外部用户成交一档后先保留缺口，等待随机时间再补回；等待期间不会因此撤掉其他订单。</p></div></div>
+      <div class="form-grid">
+        ${boundedNumberField("最短补单延迟（秒）", `${path}.fill_replenish_min_delay_seconds`, strategy.fill_replenish_min_delay_seconds ?? 3, editable, 1, 3600, "缺口首次发现后至少等待这么久")}
+        ${boundedNumberField("最长补单延迟（秒）", `${path}.fill_replenish_max_delay_seconds`, strategy.fill_replenish_max_delay_seconds ?? 8, editable, 1, 3600, "每个方向在范围内随机；实际执行取决于下一次引擎轮询")}
+      </div>
+      <div class="inline-note">默认随机等待 3～8 秒，每轮最多补回 2 档。系统主动渐进轮换产生的缺口不等待，价格保护和故障撤单逻辑也不受影响。</div>
     </section>
     <aside class="panel guidance"><span class="guide-icon">↕</span><h3>报价说明</h3><p>半点差决定第一档距离指数价的位置；后续档位按档位间距向外展开。</p><code>买一 = 指数价 − 半点差</code><code>卖一 = 指数价 ＋ 半点差</code><code>数量 = 随机${esc(quoteSymbol)}金额 ÷ 该档价格</code><code>最外档距离 = ${esc(outermostSpread)} bps</code><p>同一档位的随机目标金额保持稳定，避免行情轮询导致无意义撤挂。每个市场目标 ${ordersPerMarket} 张订单；当前 ${enabledMarketCount} 个已启用市场合计 ${totalTargetOrders} 张。订单按每轮最多 20 张滚动撤挂，避免限频和整片盘口瞬间消失。</p></aside>
     <section class="panel form-panel span-2">
@@ -1271,7 +1277,7 @@ async function createPair(event) {
     base: { symbol: base, address: body.base_address.trim(), decimals: 18 },
     quote: { symbol: quote, address: body.quote_address.trim(), decimals: 18 },
     reference: { type: "pancake_v2", legs: [], twap_window_seconds: 60, max_spot_twap_deviation_bps: 200, stale_after_seconds: 20, allow_spot_during_warmup: state.draft.mode !== "live" },
-    strategy: { half_spread_bps: 50, level_spacing_bps: 25, levels: 20, min_order_notional: "10", max_order_notional: "20", reprice_threshold_bps: 10, balance_reserve_bps: 500, max_venue_reference_deviation_bps: 500, max_venue_spread_bps: 1000, target_base: "0", max_base_deviation: "100", inventory_skew_bps: 30, quote_refresh_seconds: 45, quote_refresh_ratio_bps: 1000, min_order_lifetime_seconds: 30, max_order_lifetime_seconds: 300, price_jitter_ticks: 2, best_levels: 3, best_level_refresh_seconds: 90 },
+    strategy: { half_spread_bps: 50, level_spacing_bps: 25, levels: 20, min_order_notional: "10", max_order_notional: "20", reprice_threshold_bps: 10, balance_reserve_bps: 500, max_venue_reference_deviation_bps: 500, max_venue_spread_bps: 1000, target_base: "0", max_base_deviation: "100", inventory_skew_bps: 30, quote_refresh_seconds: 45, quote_refresh_ratio_bps: 1000, min_order_lifetime_seconds: 30, max_order_lifetime_seconds: 300, fill_replenish_min_delay_seconds: 3, fill_replenish_max_delay_seconds: 8, price_jitter_ticks: 2, best_levels: 3, best_level_refresh_seconds: 90 },
     trade_simulation: { enabled: false, source_venue: "", min_quantity: "1", max_quantity: "10", min_interval_ms: 1000, max_interval_ms: 3000, buy_probability_bps: 5000, recent_limit: 50 },
   };
   state.draft.instruments.push(pair);
@@ -1643,6 +1649,8 @@ function pairIssues(pair) {
   const refreshRatio = Number(pair.strategy?.quote_refresh_ratio_bps ?? 1000);
   const minLifetime = Number(pair.strategy?.min_order_lifetime_seconds ?? 30);
   const maxLifetime = Number(pair.strategy?.max_order_lifetime_seconds ?? 300);
+  const fillReplenishMinDelay = Number(pair.strategy?.fill_replenish_min_delay_seconds ?? 3);
+  const fillReplenishMaxDelay = Number(pair.strategy?.fill_replenish_max_delay_seconds ?? 8);
   const jitterTicks = Number(pair.strategy?.price_jitter_ticks ?? 2);
   const bestLevels = Number(pair.strategy?.best_levels ?? Math.min(3, levels));
   const bestRefreshSeconds = Number(pair.strategy?.best_level_refresh_seconds ?? 90);
@@ -1650,6 +1658,8 @@ function pairIssues(pair) {
   if (!(Number.isInteger(refreshRatio) && refreshRatio >= 1 && refreshRatio <= 10000)) issues.push("每轮轮换比例必须为 1–10000 bps");
   if (!(Number.isInteger(minLifetime) && minLifetime >= 5)) issues.push("最短挂单存活不能小于 5 秒");
   if (!(Number.isInteger(maxLifetime) && maxLifetime >= minLifetime)) issues.push("最长挂单存活不能小于最短挂单存活");
+  if (!(Number.isInteger(fillReplenishMinDelay) && fillReplenishMinDelay >= 1 && fillReplenishMinDelay <= 3600)) issues.push("成交缺口最短补单延迟必须为 1–3600 秒");
+  if (!(Number.isInteger(fillReplenishMaxDelay) && fillReplenishMaxDelay >= fillReplenishMinDelay && fillReplenishMaxDelay <= 3600)) issues.push("成交缺口最长补单延迟不能小于最短延迟，且不能超过 3600 秒");
   if (!(Number.isInteger(jitterTicks) && jitterTicks >= 1 && jitterTicks <= 100)) issues.push("价格扰动必须为 1–100 Tick");
   if (!(Number.isInteger(bestLevels) && bestLevels >= 1 && bestLevels <= levels)) issues.push("最优档数量必须在总档数范围内");
   if (!(Number.isInteger(bestRefreshSeconds) && bestRefreshSeconds >= refreshSeconds)) issues.push("最优档轮换间隔不能短于普通轮换间隔");

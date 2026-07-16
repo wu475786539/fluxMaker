@@ -86,6 +86,9 @@ test("strategy page renders progressive quote refresh controls and defaults", ()
   assert.match(html, /data-path="instruments\.0\.strategy\.quote_refresh_ratio_bps"[^>]*value="1000"/);
   assert.match(html, /data-path="instruments\.0\.strategy\.min_order_lifetime_seconds"[^>]*value="30"/);
   assert.match(html, /data-path="instruments\.0\.strategy\.max_order_lifetime_seconds"[^>]*value="300"/);
+  assert.match(html, /data-path="instruments\.0\.strategy\.fill_replenish_min_delay_seconds"[^>]*value="3"/);
+  assert.match(html, /data-path="instruments\.0\.strategy\.fill_replenish_max_delay_seconds"[^>]*value="8"/);
+  assert.match(html, /成交缺口延迟补单/);
   assert.match(html, /data-path="instruments\.0\.strategy\.price_jitter_ticks"[^>]*value="2"/);
   assert.match(html, /data-path="instruments\.0\.strategy\.best_levels"[^>]*value="3"/);
   assert.match(html, /data-path="instruments\.0\.strategy\.best_level_refresh_seconds"[^>]*value="90"/);

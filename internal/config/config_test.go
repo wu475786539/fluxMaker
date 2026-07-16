@@ -208,6 +208,9 @@ func TestNormalizeStrategyAddsQuoteRefreshDefaults(t *testing.T) {
 	if strategy.MinOrderLifetimeSeconds != DefaultMinOrderLifetimeSeconds || strategy.MaxOrderLifetimeSeconds != DefaultMaxOrderLifetimeSeconds {
 		t.Fatalf("lifetime defaults=%+v", strategy)
 	}
+	if strategy.FillReplenishMinDelaySeconds != DefaultFillReplenishMinDelaySeconds || strategy.FillReplenishMaxDelaySeconds != DefaultFillReplenishMaxDelaySeconds {
+		t.Fatalf("fill replenishment defaults=%+v", strategy)
+	}
 	if strategy.PriceJitterTicks != DefaultPriceJitterTicks || strategy.BestLevelRefreshSeconds != DefaultBestRefreshSeconds {
 		t.Fatalf("jitter/best defaults=%+v", strategy)
 	}
@@ -225,5 +228,11 @@ func TestQuoteRefreshValidation(t *testing.T) {
 	cfg.Instruments[0].Strategy.MinOrderLifetimeSeconds = 30
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected maximum lifetime below minimum to fail")
+	}
+	cfg = minimalConfig()
+	cfg.Instruments[0].Strategy.FillReplenishMinDelaySeconds = 8
+	cfg.Instruments[0].Strategy.FillReplenishMaxDelaySeconds = 3
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected maximum fill replenishment delay below minimum to fail")
 	}
 }

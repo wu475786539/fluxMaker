@@ -9,6 +9,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -41,6 +43,31 @@ class TradeSimulatorTest {
         assertEquals("SIM-A-B-1783987200100-1", result.fill().tradeId);
         assertEquals(DecimalValue.parse("306"), result.fill().quoteQuantity);
         assertEquals(Domain.Side.SELL, result.fill().side);
+    }
+
+    @Test void passesThePreviousInternalPriceToTheNextPlan() {
+        List<DecimalValue> previousPrices = new ArrayList<>();
+        VolumeSimulationPlanner planner = request -> {
+            previousPrices.add(request.previousPrice());
+            DecimalValue price = request.previousPrice() == null
+                    ? DecimalValue.parse("102")
+                    : DecimalValue.parse("103");
+            return new VolumeSimulationPlanner.EventPlan(Domain.Side.BUY, price, DecimalValue.parse("1"));
+        };
+        TradeSimulator simulator = new TradeSimulator(planner);
+        Instant start = Instant.parse("2026-07-14T00:00:00Z");
+
+        simulator.observe(instrument(), "v", market(), book(), start);
+        TradeSimulator.Observation first = simulator.observe(
+                instrument(), "v", market(), book(), start.plusMillis(100));
+        TradeSimulator.Observation second = simulator.observe(
+                instrument(), "v", market(), book(), start.plusMillis(200));
+
+        assertEquals(2, previousPrices.size());
+        assertNull(previousPrices.get(0));
+        assertEquals(DecimalValue.parse("102"), previousPrices.get(1));
+        assertEquals(DecimalValue.parse("102"), first.fill().price);
+        assertEquals(DecimalValue.parse("103"), second.fill().price);
     }
 
     @Test void frameworkRejectsAPlannerEventOutsideTheReadOnlyMarketEnvelope() {

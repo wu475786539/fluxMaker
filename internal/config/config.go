@@ -81,19 +81,23 @@ type StrategyConfig struct {
 	QuoteRefreshRatioBPS          int         `json:"quote_refresh_ratio_bps,omitempty"`
 	MinOrderLifetimeSeconds       int         `json:"min_order_lifetime_seconds,omitempty"`
 	MaxOrderLifetimeSeconds       int         `json:"max_order_lifetime_seconds,omitempty"`
+	FillReplenishMinDelaySeconds  int         `json:"fill_replenish_min_delay_seconds,omitempty"`
+	FillReplenishMaxDelaySeconds  int         `json:"fill_replenish_max_delay_seconds,omitempty"`
 	PriceJitterTicks              int         `json:"price_jitter_ticks,omitempty"`
 	BestLevels                    int         `json:"best_levels,omitempty"`
 	BestLevelRefreshSeconds       int         `json:"best_level_refresh_seconds,omitempty"`
 }
 
 const (
-	DefaultQuoteRefreshSeconds     = 45
-	DefaultQuoteRefreshRatioBPS    = 1_000
-	DefaultMinOrderLifetimeSeconds = 30
-	DefaultMaxOrderLifetimeSeconds = 300
-	DefaultPriceJitterTicks        = 2
-	DefaultBestLevels              = 3
-	DefaultBestRefreshSeconds      = 90
+	DefaultQuoteRefreshSeconds          = 45
+	DefaultQuoteRefreshRatioBPS         = 1_000
+	DefaultMinOrderLifetimeSeconds      = 30
+	DefaultMaxOrderLifetimeSeconds      = 300
+	DefaultFillReplenishMinDelaySeconds = 3
+	DefaultFillReplenishMaxDelaySeconds = 8
+	DefaultPriceJitterTicks             = 2
+	DefaultBestLevels                   = 3
+	DefaultBestRefreshSeconds           = 90
 )
 
 func (s StrategyConfig) EffectiveQuoteRefreshSeconds() int {
@@ -122,6 +126,22 @@ func (s StrategyConfig) EffectiveMaxOrderLifetime() time.Duration {
 	seconds := s.MaxOrderLifetimeSeconds
 	if seconds <= 0 {
 		seconds = DefaultMaxOrderLifetimeSeconds
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (s StrategyConfig) EffectiveFillReplenishMinDelay() time.Duration {
+	seconds := s.FillReplenishMinDelaySeconds
+	if seconds <= 0 {
+		seconds = DefaultFillReplenishMinDelaySeconds
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (s StrategyConfig) EffectiveFillReplenishMaxDelay() time.Duration {
+	seconds := s.FillReplenishMaxDelaySeconds
+	if seconds <= 0 {
+		seconds = DefaultFillReplenishMaxDelaySeconds
 	}
 	return time.Duration(seconds) * time.Second
 }
@@ -193,6 +213,12 @@ func (c *Config) NormalizeStrategySizing() {
 		}
 		if strategy.MaxOrderLifetimeSeconds == 0 {
 			strategy.MaxOrderLifetimeSeconds = DefaultMaxOrderLifetimeSeconds
+		}
+		if strategy.FillReplenishMinDelaySeconds == 0 {
+			strategy.FillReplenishMinDelaySeconds = DefaultFillReplenishMinDelaySeconds
+		}
+		if strategy.FillReplenishMaxDelaySeconds == 0 {
+			strategy.FillReplenishMaxDelaySeconds = DefaultFillReplenishMaxDelaySeconds
 		}
 		if strategy.PriceJitterTicks == 0 {
 			strategy.PriceJitterTicks = DefaultPriceJitterTicks
@@ -378,6 +404,12 @@ func (c Config) Validate() error {
 		}
 		if strategy.EffectiveMaxOrderLifetime() < strategy.EffectiveMinOrderLifetime() {
 			return fmt.Errorf("instrument %s: maximum order lifetime must be greater than or equal to minimum order lifetime", in.ID)
+		}
+		if strategy.FillReplenishMinDelaySeconds < 0 || strategy.FillReplenishMinDelaySeconds > 3_600 || strategy.FillReplenishMaxDelaySeconds < 0 || strategy.FillReplenishMaxDelaySeconds > 3_600 {
+			return fmt.Errorf("instrument %s: fill replenishment delays must be 0..3600 seconds", in.ID)
+		}
+		if strategy.EffectiveFillReplenishMaxDelay() < strategy.EffectiveFillReplenishMinDelay() {
+			return fmt.Errorf("instrument %s: maximum fill replenishment delay must be greater than or equal to minimum fill replenishment delay", in.ID)
 		}
 		if strategy.PriceJitterTicks < 0 || strategy.PriceJitterTicks > 100 {
 			return fmt.Errorf("instrument %s: price jitter must be 0..100 ticks", in.ID)

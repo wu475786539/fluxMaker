@@ -22,6 +22,7 @@ public interface VolumeSimulationPlanner {
             String sourceVenue,
             AppConfig.VenueMarketConfig market,
             Domain.Book book,
+            DecimalValue previousPrice,
             Instant now,
             long sequence
     ) {}
