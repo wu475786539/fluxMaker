@@ -18,6 +18,30 @@ FluxMaker 是一个使用 PancakeSwap V2 参考价格、同时支持 Binance Spo
 
 ## Docker 启动
 
+### 一条命令部署到 Linux 服务器
+
+服务器还没有安装 Docker 也可以直接运行。脚本会自动安装 Docker Engine、Buildx、Docker Compose 和基础工具，打包当前代码并通过 SSH 上传，在服务器构建启动，开放本机防火墙端口并等待健康检查通过：
+
+```bash
+./deploy.sh root@服务器公网IP
+```
+
+默认部署 Java 后台，访问地址是 `http://服务器公网IP:8080`。首次部署会在服务器自动生成 PostgreSQL、Redis、管理员、Metrics 和主加密密钥，并在命令结束时显示一次管理员密码；重复部署会保留服务器的 `.env`、主加密密钥和 Docker 数据卷。部署成功后默认保留最近 3 个版本供回滚，自动删除更旧的 FluxMaker 镜像和发布目录，并清理 7 天前的未使用构建缓存；不会执行卷清理，也不会删除 PostgreSQL、Redis 或运行数据。
+
+使用 SSH 私钥或其他端口：
+
+```bash
+./deploy.sh --identity ~/.ssh/server.pem --ssh-port 22 ubuntu@服务器公网IP
+```
+
+如果要明确使用已有生产环境变量（例如首次迁移已有主加密密钥），可以传入本机环境文件：
+
+```bash
+./deploy.sh --env-file .env root@服务器公网IP
+```
+
+部署账号必须是 `root` 或拥有 `sudo` 权限，支持 Ubuntu、Debian、CentOS、RHEL、Rocky Linux 和 AlmaLinux。脚本能处理服务器内的 UFW/firewalld，但云厂商安全组需要另外放行 TCP `8080`。默认保持 `FLUXMAKER_ENABLE_LIVE_TRADING=DISABLED`；只有显式上传的环境文件或后续人工修改才会开启实盘二次开关。公网 IP 方式目前是 HTTP 临时访问，配置域名和 HTTPS 前应把云安全组来源限制为自己的固定 IP，不要开启实盘。
+
 准备环境变量：
 
 ```bash

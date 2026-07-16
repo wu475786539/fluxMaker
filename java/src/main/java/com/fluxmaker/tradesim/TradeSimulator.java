@@ -77,8 +77,8 @@ public final class TradeSimulator {
         Domain.Fill generated = null;
         if (!now.isBefore(state.nextAt)) {
             state.nextAt = now.plusMillis(randomDuration(config.minIntervalMs, config.maxIntervalMs));
+            long sequence = state.sequence + 1;
             try {
-                long sequence = state.sequence + 1;
                 VolumeSimulationPlanner.Request request = new VolumeSimulationPlanner.Request(
                         instrument, venueName, market, book, now, sequence);
                 generated = materialize(instrument, venueName, market, book, now, sequence, planner.plan(request));
@@ -91,7 +91,18 @@ public final class TradeSimulator {
                 snapshot.status = "running";
             } catch (RuntimeException e) {
                 snapshot.status = "skipped";
-                snapshot.error = e.getMessage();
+                snapshot.error = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                System.out.printf(
+                        "[volume-simulation] skipped instrument=%s source_venue=%s symbol=%s sequence=%d "
+                                + "bid=%s ask=%s error=%s%n",
+                        instrument.id,
+                        venueName,
+                        market.symbol,
+                        sequence,
+                        book.bidPrice,
+                        book.askPrice,
+                        snapshot.error
+                );
             }
         }
         snapshot.lastGeneratedAt = state.lastGeneratedAt;
