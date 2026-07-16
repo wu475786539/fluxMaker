@@ -13,6 +13,7 @@ import com.fluxmaker.strategy.QuoteGenerator;
 import com.fluxmaker.tradesim.TradeSimulator;
 import com.fluxmaker.tradesim.VolumeSimulationPlannerImpl;
 import com.fluxmaker.venue.VenueClient;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.security.SecureRandom;
 import java.time.Duration;
@@ -44,6 +45,7 @@ public final class TradingEngine {
     private final RuntimeStore runtime;
     private final AuditLogger audit;
     private final Reconciler reconciler;
+    private final RepriceModeTracker repriceModes = new RepriceModeTracker();
     private final QuoteGenerator strategy = new QuoteGenerator();
     private final RiskEngine risk = new RiskEngine();
     private final FaultManager faults;
@@ -86,6 +88,7 @@ public final class TradingEngine {
             if (updated == null) continue;
             if (updated.strategy.maxVenueReferenceDeviationBps == 0) updated.strategy.maxVenueReferenceDeviationBps = 500;
             if (updated.strategy.maxVenueSpreadBps == 0) updated.strategy.maxVenueSpreadBps = 1000;
+            if (requiresUrgentReprice(current.strategy, updated.strategy)) markUrgentMarkets(current.id);
             current.strategy = updated.strategy;
             current.tradeSimulation = updated.tradeSimulation;
         }
@@ -172,7 +175,8 @@ public final class TradingEngine {
                 try (LeaseKeeper keeper = new LeaseKeeper(leaseKey, generation)) {
                 quotes = RiskEngine.applyOrderLimit(quotes, venueSnapshot.openOrders.size(), managed.size(), market.maxOpenOrders); DecimalValue baseFree = venueSnapshot.baseBalance == null ? DecimalValue.ZERO : venueSnapshot.baseBalance.free, quoteFree = venueSnapshot.quoteBalance == null ? DecimalValue.ZERO : venueSnapshot.quoteBalance.free; RiskEngine.BudgetResult budget = RiskEngine.applyBalanceBudget(quotes, managed, baseFree, quoteFree, instrument.strategy.balanceReserveBps, market.maxBaseCommitment, market.maxQuoteCommitment); quotes = budget.quotes(); venueSnapshot.budget = budget.budget();
                 if (quotes.isEmpty()) { RuntimeException error = new IllegalStateException("balance budget allows no orders"); markFailure(snapshot, venueSnapshot, instrument, venueName, venue, market, client, "budget", error, true); failures.add(venueName + " budget: " + error.getMessage()); continue; }
-                FaultManager.Decision health = faults.healthy(faultKey(venueName, instrument.id, market), managed.size()); venueSnapshot.fault = Json.tree(health.state()); Reconciler.WriteGuard guard = keeper.guard();
+                String marketStateKey = faultKey(venueName, instrument.id, market);
+                FaultManager.Decision health = faults.healthy(marketStateKey, managed.size()); venueSnapshot.fault = Json.tree(health.state()); Reconciler.WriteGuard guard = keeper.guard();
                 if (health.shouldCancel()) { int canceled = reconciler.cancelManaged(client, instrument.id, market.symbol, guard); metrics.oms(0, canceled); failures.add(venueName + " fault state: " + health.state().status); continue; }
                 if (!health.allowQuotes()) { failures.add(venueName + " fault state: " + health.state().status); continue; }
                 Reconciler.RefreshPolicy refreshPolicy = Reconciler.RefreshPolicy.disabled();
@@ -182,7 +186,32 @@ public final class TradingEngine {
                             instrument.strategy.effectiveMaxOrderLifetime(),
                             instrument.strategy.refreshOrdersPerCycle(quotes.size()));
                 }
-                audit.record("quote_plan", Map.of("instrument", instrument.id, "venue", venueName, "budget", budget.budget(), "quote_count", quotes.size())); Instant omsStarted = Instant.now(); try { Reconciler.Result result = reconciler.reconcileWithOrders(client, instrument.id, quotes, instrument.strategy.repriceThresholdBps, venueSnapshot.openOrders, guard, generation, refreshPolicy); venueSnapshot.pendingOrders = result.pending; metrics.oms(result.placed, result.canceled); audit.record("oms_result", Map.of("instrument", instrument.id, "venue", venueName, "result", result)); } catch (RuntimeException e) { try { metrics.oms(0, reconciler.cancelManaged(client, instrument.id, market.symbol, guard)); } catch (RuntimeException ignored) {} markFailure(snapshot, venueSnapshot, instrument, venueName, venue, market, client, "oms", e, true); failures.add(venueName + " OMS: " + e.getMessage()); } venueSnapshot.omsDurationMs = millis(omsStarted);
+                boolean gradualMaterialReprice = refreshPolicy.maxRefreshesPerCycle() > 0
+                        && repriceModes.gradualAllowed(
+                                marketStateKey,
+                                reference.price,
+                                instrument.strategy.maxVenueReferenceDeviationBps);
+                Reconciler.ReplenishPolicy replenishPolicy = new Reconciler.ReplenishPolicy(
+                        instrument.strategy.effectiveFillReplenishMinDelay(),
+                        instrument.strategy.effectiveFillReplenishMaxDelay(),
+                        2);
+                audit.record("quote_plan", Map.of("instrument", instrument.id, "venue", venueName, "budget", budget.budget(), "quote_count", quotes.size()));
+                Instant omsStarted = Instant.now();
+                try {
+                    Reconciler.Result result = reconciler.reconcileWithOrders(
+                            client, instrument.id, quotes, instrument.strategy.repriceThresholdBps,
+                            venueSnapshot.openOrders, guard, generation, refreshPolicy,
+                            gradualMaterialReprice, replenishPolicy);
+                    repriceModes.observeResult(marketStateKey, result, quotes.size());
+                    venueSnapshot.pendingOrders = result.pending;
+                    metrics.oms(result.placed, result.canceled);
+                    audit.record("oms_result", Map.of(
+                            "instrument", instrument.id,
+                            "venue", venueName,
+                            "reprice_mode", gradualMaterialReprice ? "gradual" : "urgent",
+                            "result", result));
+                } catch (RuntimeException e) { try { metrics.oms(0, reconciler.cancelManaged(client, instrument.id, market.symbol, guard)); } catch (RuntimeException ignored) {} markFailure(snapshot, venueSnapshot, instrument, venueName, venue, market, client, "oms", e, true); failures.add(venueName + " OMS: " + e.getMessage()); }
+                venueSnapshot.omsDurationMs = millis(omsStarted);
                 }
             }
             if (active == 0) failures.add("no enabled venue markets"); if (!failures.isEmpty()) throw new IllegalStateException(String.join("; ", failures));
@@ -215,11 +244,28 @@ public final class TradingEngine {
 
     public int refreshMarketRules() {
         int changes = 0; List<String> failures = new ArrayList<>();
-        for (Map.Entry<String, AppConfig.VenueConfig> entry : config.venues.entrySet()) if (entry.getValue().enabled) for (Map.Entry<String, AppConfig.VenueMarketConfig> marketEntry : entry.getValue().markets.entrySet()) { VenueClient client = venues.get(clientKey(entry.getKey(), marketEntry.getKey())); if (client == null || !client.capabilities().marketRules()) { failures.add(entry.getKey() + "/" + marketEntry.getKey() + ": trading rules unavailable"); continue; } try { Domain.MarketRules rules = client.marketRules(marketEntry.getValue().symbol); Domain.MarketRules previous = rules(marketEntry.getValue()); applyRules(marketEntry.getValue(), rules); if (!Json.tree(previous).equals(Json.tree(rules(marketEntry.getValue())))) { RuntimeStore.RuleChange change = new RuntimeStore.RuleChange(); change.instrumentId = marketEntry.getKey(); change.venue = entry.getKey(); change.symbol = marketEntry.getValue().symbol; change.previous = previous; change.current = rules(marketEntry.getValue()); change.detectedAt = Instant.now(); runtime.reportRuleChange(change); audit.record("trading_rules_changed", change); metrics.ruleChange(); changes++; } } catch (RuntimeException e) { failures.add(entry.getKey() + "/" + marketEntry.getKey() + ": " + e.getMessage()); } }
+        for (Map.Entry<String, AppConfig.VenueConfig> entry : config.venues.entrySet()) if (entry.getValue().enabled) for (Map.Entry<String, AppConfig.VenueMarketConfig> marketEntry : entry.getValue().markets.entrySet()) { VenueClient client = venues.get(clientKey(entry.getKey(), marketEntry.getKey())); if (client == null || !client.capabilities().marketRules()) { failures.add(entry.getKey() + "/" + marketEntry.getKey() + ": trading rules unavailable"); continue; } try { Domain.MarketRules rules = client.marketRules(marketEntry.getValue().symbol); Domain.MarketRules previous = rules(marketEntry.getValue()); applyRules(marketEntry.getValue(), rules); if (!Json.tree(previous).equals(Json.tree(rules(marketEntry.getValue())))) { repriceModes.markUrgent(faultKey(entry.getKey(), marketEntry.getKey(), marketEntry.getValue())); RuntimeStore.RuleChange change = new RuntimeStore.RuleChange(); change.instrumentId = marketEntry.getKey(); change.venue = entry.getKey(); change.symbol = marketEntry.getValue().symbol; change.previous = previous; change.current = rules(marketEntry.getValue()); change.detectedAt = Instant.now(); runtime.reportRuleChange(change); audit.record("trading_rules_changed", change); metrics.ruleChange(); changes++; } } catch (RuntimeException e) { failures.add(entry.getKey() + "/" + marketEntry.getKey() + ": " + e.getMessage()); } }
         audit.flush(); if (!failures.isEmpty()) throw new IllegalStateException("refresh trading rules: " + String.join("; ", failures)); return changes;
     }
 
     public int retryBlocked() { int recovered = 0; for (String id : new ArrayList<>(preflightBlocked.keySet())) { AppConfig.InstrumentConfig instrument = instrument(id); if (instrument == null) continue; try { prepareInstrument(instrument, null); preflightBlocked.remove(id); startupFailures.remove(id); recovered++; } catch (RuntimeException e) { preflightBlocked.put(id, e.getMessage()); } } return recovered; }
+
+    private void markUrgentMarkets(String instrumentId) {
+        for (Map.Entry<String, AppConfig.VenueConfig> entry : config.venues.entrySet()) {
+            AppConfig.VenueMarketConfig market = entry.getValue().markets.get(instrumentId);
+            if (entry.getValue().enabled && market != null) {
+                repriceModes.markUrgent(faultKey(entry.getKey(), instrumentId, market));
+            }
+        }
+    }
+
+    private static boolean requiresUrgentReprice(AppConfig.StrategyConfig current, AppConfig.StrategyConfig updated) {
+        ObjectNode previous = (ObjectNode) Json.tree(current);
+        ObjectNode next = (ObjectNode) Json.tree(updated);
+        previous.remove(List.of("fill_replenish_min_delay_seconds", "fill_replenish_max_delay_seconds"));
+        next.remove(List.of("fill_replenish_min_delay_seconds", "fill_replenish_max_delay_seconds"));
+        return !previous.equals(next);
+    }
 
     public void cancelMarket(String instrumentId, String venueName) { AppConfig.VenueConfig venue = config.venues.get(venueName); if (venue == null || !venue.enabled || !venue.tradingEnabled) return; AppConfig.VenueMarketConfig market = venue.markets.get(instrumentId); if (market == null) return; VenueClient client = venues.get(clientKey(venueName, instrumentId)); if (client == null) throw new IllegalStateException("client missing"); cancelManagedFenced(venueName, instrumentId, market, client); faults.reset(faultKey(venueName, instrumentId, market)); }
     public void shutdown() { List<String> failures = new ArrayList<>(); for (AppConfig.InstrumentConfig instrument : config.instruments) try { cancelInstrument(instrument); } catch (RuntimeException e) { failures.add(instrument.id + ": " + e.getMessage()); } for (Map.Entry<String, Long> lease : new HashMap<>(heldLeases).entrySet()) try { runtime.releaseMarketLease(lease.getKey(), ownerId, lease.getValue()); heldLeases.remove(lease.getKey()); } catch (RuntimeException e) { failures.add("lease " + lease.getKey() + ": " + e.getMessage()); } audit.flush(); close(); if (!failures.isEmpty()) throw new IllegalStateException("shutdown cancel failures: " + String.join("; ", failures)); }

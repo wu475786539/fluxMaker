@@ -28,6 +28,7 @@ public final class TradeSimulator {
         Instant nextAt;
         Instant lastGeneratedAt;
         List<Domain.Fill> fills = new ArrayList<>();
+        DecimalValue lastPrice;
         long sequence;
     }
 
@@ -80,10 +81,11 @@ public final class TradeSimulator {
             long sequence = state.sequence + 1;
             try {
                 VolumeSimulationPlanner.Request request = new VolumeSimulationPlanner.Request(
-                        instrument, venueName, market, book, now, sequence);
+                        instrument, venueName, market, book, state.lastPrice, now, sequence);
                 generated = materialize(instrument, venueName, market, book, now, sequence, planner.plan(request));
                 state.sequence = sequence;
                 state.lastGeneratedAt = now;
+                state.lastPrice = generated.price;
                 state.fills.addFirst(generated);
                 if (state.fills.size() > config.recentLimit) {
                     state.fills = new ArrayList<>(state.fills.subList(0, config.recentLimit));

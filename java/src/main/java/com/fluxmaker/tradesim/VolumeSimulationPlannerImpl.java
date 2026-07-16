@@ -6,9 +6,21 @@ import com.fluxmaker.math.DecimalValue;
 
 import java.math.BigInteger;
 import java.security.SecureRandom;
+import java.util.Objects;
+import java.util.Random;
 
 public final class VolumeSimulationPlannerImpl implements VolumeSimulationPlanner {
-    private static final SecureRandom RANDOM = new SecureRandom();
+    private static final BigInteger WALK_RANGE_DIVISOR = BigInteger.valueOf(5);
+    private static final int HOLD_PROBABILITY_BPS = 2_000;
+    private final Random random;
+
+    public VolumeSimulationPlannerImpl() {
+        this(new SecureRandom());
+    }
+
+    VolumeSimulationPlannerImpl(Random random) {
+        this.random = Objects.requireNonNull(random, "random");
+    }
 
     @Override
     public EventPlan plan(Request request) {
@@ -36,7 +48,7 @@ public final class VolumeSimulationPlannerImpl implements VolumeSimulationPlanne
         DecimalValue priceTick = market.priceTick;
         DecimalValue quantityStep = market.quantityStep;
 
-        // 在买一和卖一之间的全部合法 Tick 中随机选择成交价。
+        // 找出严格位于买一和卖一之间的合法 Tick 边界。
         DecimalValue minimumPrice = book.bidPrice
                 .quantizeDown(priceTick)
                 .add(priceTick);
@@ -52,7 +64,10 @@ public final class VolumeSimulationPlannerImpl implements VolumeSimulationPlanne
                     "买一和卖一之间没有合法价格 Tick"
             );
         }
-        DecimalValue price = randomStep(
+        // 首次从价差中部开始；后续以上一次内部成交价为中心做局部随机游走，
+        // 避免每条事件都在整个买卖价差中重新抽取导致价格大幅跳变。
+        DecimalValue price = gradualPrice(
+                request.previousPrice(),
                 minimumPrice,
                 maximumPrice,
                 priceTick
@@ -101,12 +116,13 @@ public final class VolumeSimulationPlannerImpl implements VolumeSimulationPlanne
                 : Domain.Side.BUY;
 
         System.out.printf(
-                "[volume-simulation] plan created instrument=%s sequence=%d side=%s bid=%s ask=%s price=%s quantity=%s%n",
+                "[volume-simulation] plan created instrument=%s sequence=%d side=%s bid=%s ask=%s previous_price=%s price=%s quantity=%s%n",
                 request.instrument().id,
                 request.sequence(),
                 side,
                 book.bidPrice,
                 book.askPrice,
+                request.previousPrice(),
                 price,
                 minimumQuantity
         );
@@ -117,21 +133,53 @@ public final class VolumeSimulationPlannerImpl implements VolumeSimulationPlanne
         );
     }
 
-    private static DecimalValue randomStep(
+    private DecimalValue gradualPrice(
+            DecimalValue previous,
             DecimalValue minimum,
             DecimalValue maximum,
             DecimalValue step
     ) {
-        BigInteger choices = maximum
+        if (previous == null
+                || previous.compareTo(minimum) < 0
+                || previous.compareTo(maximum) > 0
+                || !previous.equals(previous.quantizeDown(step))) {
+            return minimum
+                    .add(maximum)
+                    .divide(DecimalValue.of(2))
+                    .quantizeDown(step)
+                    .max(minimum)
+                    .min(maximum);
+        }
+
+        // 约 20% 的事件保持同价，使成交序列更像缓慢波动而不是机械跳动。
+        if (random.nextInt(10_000) < HOLD_PROBABILITY_BPS) {
+            return previous;
+        }
+
+        BigInteger legalTicks = maximum
                 .subtract(minimum)
                 .floorQuotient(step)
                 .add(BigInteger.ONE);
+        BigInteger maximumWalkTicks = legalTicks
+                .add(WALK_RANGE_DIVISOR.subtract(BigInteger.ONE))
+                .divide(WALK_RANGE_DIVISOR)
+                .max(BigInteger.ONE);
+        BigInteger walkTicks = randomBelow(maximumWalkTicks).add(BigInteger.ONE);
+        DecimalValue movement = step.multiply(DecimalValue.fraction(walkTicks, BigInteger.ONE));
+
+        boolean moveUp = random.nextBoolean();
+        DecimalValue candidate = moveUp ? previous.add(movement) : previous.subtract(movement);
+        if (candidate.compareTo(maximum) > 0 || candidate.compareTo(minimum) < 0) {
+            candidate = moveUp ? previous.subtract(movement) : previous.add(movement);
+        }
+        return candidate.max(minimum).min(maximum);
+    }
+
+    private BigInteger randomBelow(BigInteger bound) {
         BigInteger selection;
         do {
-            selection = new BigInteger(choices.bitLength(), RANDOM);
-        } while (selection.compareTo(choices) >= 0);
-        return minimum.add(
-                step.multiply(DecimalValue.fraction(selection, BigInteger.ONE))
-        );
+            selection = new BigInteger(bound.bitLength(), random);
+        } while (selection.compareTo(bound) >= 0);
+        return selection;
     }
 }
