@@ -23,6 +23,7 @@ public final class VolumeSimulationPlannerImpl implements VolumeSimulationPlanne
     private static final BigInteger WALK_RANGE_DIVISOR = BigInteger.valueOf(5);
     private static final int HOLD_PROBABILITY_BPS = 2_000;
     private final Random random;
+    private static final SecureRandom RANDOM = new SecureRandom();
 
     public VolumeSimulationPlannerImpl() {
         this(new SecureRandom());
