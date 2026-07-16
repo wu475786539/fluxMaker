@@ -15,7 +15,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HexFormat;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -31,7 +30,7 @@ public final class MgbxClient implements VenueClient {
 
     @Override public String name() { return name; }
     @Override public String stateIdentity() { return identity; }
-    @Override public Capabilities capabilities() { return new Capabilities(false, true, true, true, true, true); }
+    @Override public Capabilities capabilities() { return new Capabilities(false, false, true, true, true, true); }
 
     @Override public Domain.Book topBook(String symbol) {
         Map<String, List<String>> values = HttpSupport.params(); HttpSupport.set(values, "symbol", symbol); HttpSupport.set(values, "level", 5);
@@ -70,38 +69,11 @@ public final class MgbxClient implements VenueClient {
         Map<String, List<String>> values = HttpSupport.params(); HttpSupport.set(values, "symbol", request.symbol()); HttpSupport.set(values, "direction", request.side()); HttpSupport.set(values, "tradeType", "LIMIT"); HttpSupport.set(values, "totalAmount", request.quantity()); HttpSupport.set(values, "price", request.price()); HttpSupport.set(values, "timeInForce", "GTX"); JsonNode raw = request("POST", "/spot/v1/u/trade/order/create", values, true); Domain.Order order = new Domain.Order(); order.venue = name; order.orderId = raw.asText(); order.symbol = request.symbol(); order.side = request.side(); order.price = request.price(); order.quantity = request.quantity(); order.state = Domain.OrderState.UNKNOWN; order.createdAt = Instant.now(); return order;
     }
 
-    /** Creates several post-only orders in one signed request via MGBX's batch
-     *  endpoint. Every order carries timeInForce=GTX to stay maker-only, mirroring
-     *  {@link #placePostOnly}. Results keep request order; an item the exchange did
-     *  not confirm gets an empty order id so the OMS reconciles the batch. */
+    /** MGBX's native batch-create route is intermittently terminated by its edge.
+     *  Keep this method safe for direct callers by falling back to the stable
+     *  single-order route; capabilities() also tells the OMS not to use native batch. */
     @Override public List<Domain.Order> placePostOnlyBatch(List<PlaceRequest> requests) {
-        if (requests.isEmpty()) return List.of();
-        List<Map<String, String>> payload = new ArrayList<>();
-        for (PlaceRequest request : requests) {
-            Map<String, String> order = new LinkedHashMap<>();
-            order.put("symbol", request.symbol());
-            order.put("direction", request.side().name());
-            order.put("tradeType", "LIMIT");
-            order.put("totalAmount", request.quantity().toString());
-            order.put("price", request.price().toString());
-            // order.put("timeInForce", "GTX");
-            payload.add(order);
-        }
-        Map<String, List<String>> values = HttpSupport.params(); HttpSupport.set(values, "ordersJsonStr", Json.write(payload));
-        JsonNode data = request("POST", "/spot/v1/u/trade/order/batch/create", values, true);
-        // System.out.println("mgbx:"+data.toString());
-        List<Domain.Order> orders = new ArrayList<>();
-        for (int index = 0; index < requests.size(); index++) {
-            PlaceRequest request = requests.get(index);
-            Domain.Order order = new Domain.Order();
-            order.venue = name; order.symbol = request.symbol(); order.side = request.side();
-            order.price = request.price(); order.quantity = request.quantity();
-            order.state = Domain.OrderState.UNKNOWN; order.createdAt = Instant.now();
-            JsonNode item = data.isArray() && index < data.size() ? data.get(index) : null;
-            if (item != null && item.path("code").asInt(-1) == 0) order.orderId = item.path("data").asText("");
-            orders.add(order);
-        }
-        return orders;
+        return VenueClient.super.placePostOnlyBatch(requests);
     }
 
     @Override public void cancelOrder(String symbol, String orderId) { Map<String, List<String>> values = HttpSupport.params(); HttpSupport.set(values, "orderId", orderId); request("POST", "/spot/v1/u/trade/order/cancel", values, true); }

@@ -1,8 +1,6 @@
 package com.fluxmaker.venue;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fluxmaker.domain.Domain;
-import com.fluxmaker.json.Json;
 import com.fluxmaker.math.DecimalValue;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Test;
@@ -14,32 +12,34 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
-/** Verifies MgbxClient.placePostOnlyBatch talks to /batch/create once, keeps
- *  every order maker-only (timeInForce=GTX), and maps the returned order ids back
- *  in request order — all against a local stub, no real exchange. */
+/** Verifies that MGBX batch placement is deliberately disabled and every
+ *  requested order is sent through the stable single-order endpoint instead. */
 class MgbxBatchPlaceTest {
 
     @Test
-    void submitsOnePostOnlyBatchAndMapsOrderIdsInOrder() throws IOException {
+    void fallsBackToSignedPostOnlySingleOrders() throws IOException {
         AtomicInteger calls = new AtomicInteger();
-        AtomicReference<String> path = new AtomicReference<>();
-        AtomicReference<String> ordersJson = new AtomicReference<>();
+        List<String> paths = new CopyOnWriteArrayList<>();
+        List<String> queries = new CopyOnWriteArrayList<>();
+        List<String> contentTypes = new CopyOnWriteArrayList<>();
+        List<String> bodies = new CopyOnWriteArrayList<>();
 
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/", exchange -> {
             try {
-                calls.incrementAndGet();
-                path.set(exchange.getRequestURI().getPath());
-                ordersJson.set(param(exchange.getRequestURI().getRawQuery(), "ordersJsonStr"));
-                byte[] body = ("{\"code\":0,\"msg\":\"ok\",\"data\":["
-                        + "{\"code\":0,\"data\":\"1001\"},"
-                        + "{\"code\":0,\"data\":\"1002\"},"
-                        + "{\"code\":0,\"data\":\"1003\"}]}").getBytes(StandardCharsets.UTF_8);
+                int call = calls.incrementAndGet();
+                paths.add(exchange.getRequestURI().getPath());
+                queries.add(exchange.getRequestURI().getRawQuery());
+                contentTypes.add(exchange.getRequestHeaders().getFirst("Content-Type"));
+                bodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+                byte[] body = ("{\"code\":0,\"msg\":\"ok\",\"data\":\"100" + call + "\"}")
+                        .getBytes(StandardCharsets.UTF_8);
                 exchange.getResponseHeaders().add("Content-Type", "application/json");
                 exchange.sendResponseHeaders(200, body.length);
                 try (OutputStream out = exchange.getResponseBody()) { out.write(body); }
@@ -49,6 +49,7 @@ class MgbxBatchPlaceTest {
         try {
             String baseUrl = "http://127.0.0.1:" + server.getAddress().getPort();
             MgbxClient client = new MgbxClient("t", "t", baseUrl, "key", "secret", Duration.ofSeconds(5));
+            assertFalse(client.capabilities().nativeBatchPlace(), "OMS must not call the unreliable native batch endpoint");
 
             List<VenueClient.PlaceRequest> requests = List.of(
                     new VenueClient.PlaceRequest("GDT_USDT", Domain.Side.BUY, DecimalValue.parse("0.1"), DecimalValue.parse("100"), "fm-a", 0),
@@ -57,20 +58,21 @@ class MgbxBatchPlaceTest {
 
             List<Domain.Order> orders = client.placePostOnlyBatch(requests);
 
-            assertEquals(1, calls.get(), "the whole batch must be a single signed request");
-            assertEquals("/spot/v1/u/trade/order/batch/create", path.get());
-            assertEquals(List.of("1001", "1002", "1003"),
-                    orders.stream().map(order -> order.orderId).toList(),
-                    "order ids map back in request order");
-
-            JsonNode payload = Json.MAPPER.readTree(ordersJson.get());
-            assertEquals(3, payload.size(), "all three orders are in the batch payload");
-            for (JsonNode order : payload) {
-                assertEquals("GTX", order.path("timeInForce").asText(), "batch orders must stay maker-only (post-only)");
-                assertEquals("LIMIT", order.path("tradeType").asText());
+            assertEquals(3, calls.get(), "each requested order must use its own POST");
+            assertEquals(List.of("1001", "1002", "1003"), orders.stream().map(order -> order.orderId).toList());
+            assertEquals(List.of(
+                    "/spot/v1/u/trade/order/create",
+                    "/spot/v1/u/trade/order/create",
+                    "/spot/v1/u/trade/order/create"), paths);
+            for (int index = 0; index < queries.size(); index++) {
+                String query = queries.get(index);
+                assertEquals("GDT_USDT", param(query, "symbol"));
+                assertEquals("LIMIT", param(query, "tradeType"));
+                assertEquals("GTX", param(query, "timeInForce"), "single-order fallback must remain post-only");
+                assertEquals(requests.get(index).side().name(), param(query, "direction"));
+                assertEquals("application/x-www-form-urlencoded", contentTypes.get(index));
+                assertEquals("", bodies.get(index));
             }
-            assertEquals("BUY", payload.get(0).path("direction").asText());
-            assertEquals("SELL", payload.get(2).path("direction").asText());
         } finally {
             server.stop(0);
         }

@@ -55,7 +55,12 @@ func New(name, baseURL, apiKey, secret string, timeout time.Duration) *Client {
 }
 
 func NewWithIdentity(name, identity, baseURL, apiKey, secret string, timeout time.Duration) *Client {
-	return &Client{name: name, identity: identity, baseURL: strings.TrimRight(baseURL, "/"), apiKey: apiKey, secret: secret, http: &http.Client{Timeout: timeout}}
+	// MGBX sits behind a CDN (scdnpro) that silently closes idle connections after
+	// ~60s. Go's default 90s IdleConnTimeout would reuse a dead socket and hang until
+	// Timeout, so drop idle connections well before the CDN does.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.IdleConnTimeout = 15 * time.Second
+	return &Client{name: name, identity: identity, baseURL: strings.TrimRight(baseURL, "/"), apiKey: apiKey, secret: secret, http: &http.Client{Timeout: timeout, Transport: transport}}
 }
 
 func (c *Client) Name() string          { return c.name }

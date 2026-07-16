@@ -10,6 +10,10 @@ x-backend-build: &backend-build
   context: .
   dockerfile: Dockerfile-${BACKEND_IMPL:-go}
   network: host
+  args:
+    FLUXMAKER_BUILD_ID: ${FLUXMAKER_BUILD_ID:-local}
+    FLUXMAKER_BUILD_COMMIT: ${FLUXMAKER_BUILD_COMMIT:-unknown}
+    FLUXMAKER_BUILD_TIME: ${FLUXMAKER_BUILD_TIME:-unknown}
 
 services:
   postgres:
@@ -91,6 +95,9 @@ services:
     # while tagging the same local image for three services.
     restart: unless-stopped
     command: ["/usr/local/bin/fluxmaker"]
+    # Give the engine time to run its SIGTERM handler (release leases, best-effort
+    # cancel) before SIGKILL. The default 10s can be too short mid-tick.
+    stop_grace_period: 30s
     environment: &runtime_environment
       DATABASE_URL: postgres://fluxmaker:${POSTGRES_PASSWORD}@postgres:5432/fluxmaker?sslmode=disable
       REDIS_ADDR: redis:6379

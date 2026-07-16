@@ -72,13 +72,22 @@ type WriteGuard func(context.Context) error
 
 type persistedState struct {
 	Blocked        string                   `json:"blocked,omitempty"`
+	BlockedAtMs    int64                    `json:"blocked_at_ms,omitempty"`
 	PendingCancels *pendingCancelBatch      `json:"pending_cancels,omitempty"`
 	PendingCreates map[string]pendingCreate `json:"pending_creates,omitempty"`
 }
 
+// blockRecoveryDelay is the settle window after an uncertain submit/cancel (e.g. a
+// request timeout). We block the market so we don't blindly retry a batch that may
+// have partially landed; once this window passes the exchange has resolved the
+// outcome and the fresh openOrders read each cycle is authoritative (managesAllOrders
+// venues, or our deterministic clientID), so the block self-heals instead of wedging.
+const blockRecoveryDelay = 15 * time.Second
+
 type Reconciler struct {
 	mu             sync.Mutex
 	blocked        map[string]error
+	blockedAt      map[string]time.Time
 	pendingCancels map[string]pendingCancelBatch
 	pendingCreates map[string]map[string]pendingCreate
 	loaded         map[string]bool
@@ -90,7 +99,7 @@ func New() *Reconciler {
 }
 
 func NewWithStateStore(store StateStore) *Reconciler {
-	return &Reconciler{blocked: map[string]error{}, pendingCancels: map[string]pendingCancelBatch{}, pendingCreates: map[string]map[string]pendingCreate{}, loaded: map[string]bool{}, store: store}
+	return &Reconciler{blocked: map[string]error{}, blockedAt: map[string]time.Time{}, pendingCancels: map[string]pendingCancelBatch{}, pendingCreates: map[string]map[string]pendingCreate{}, loaded: map[string]bool{}, store: store}
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, client venue.Client, instrumentID string, quotes []domain.Quote, repriceThresholdBPS int) (Result, error) {
@@ -119,9 +128,20 @@ func (r *Reconciler) ReconcileWithOrdersGuardedPolicy(ctx context.Context, clien
 	}
 	r.mu.Lock()
 	blocked := r.blocked[key]
+	since := r.blockedAt[key]
 	r.mu.Unlock()
 	if blocked != nil {
-		return Result{}, fmt.Errorf("venue market blocked after uncertain order state: %w", blocked)
+		if time.Since(since) < blockRecoveryDelay {
+			return Result{}, fmt.Errorf("venue market blocked after uncertain order state: %w", blocked)
+		}
+		// Settle window elapsed: drop the block and resync against real openOrders below.
+		r.mu.Lock()
+		delete(r.blocked, key)
+		delete(r.blockedAt, key)
+		r.mu.Unlock()
+		if err := r.persist(ctx, key); err != nil {
+			return Result{}, fmt.Errorf("persist OMS state: %w", err)
+		}
 	}
 	if len(quotes) == 0 {
 		return Result{}, fmt.Errorf("empty quote target")
@@ -511,6 +531,7 @@ func (r *Reconciler) ClearBlocked(ctx context.Context, client venue.Client, inst
 	}
 	r.mu.Lock()
 	delete(r.blocked, key)
+	delete(r.blockedAt, key)
 	r.mu.Unlock()
 	return r.persist(ctx, key)
 }
@@ -577,6 +598,7 @@ func checkWriteGuard(ctx context.Context, guard WriteGuard) error {
 func (r *Reconciler) block(ctx context.Context, key string, err error) {
 	r.mu.Lock()
 	r.blocked[key] = err
+	r.blockedAt[key] = time.Now().UTC()
 	r.mu.Unlock()
 	_ = r.persist(ctx, key)
 }
@@ -620,6 +642,9 @@ func (r *Reconciler) ensureLoaded(ctx context.Context, key string) error {
 	defer r.mu.Unlock()
 	if saved.Blocked != "" {
 		r.blocked[key] = fmt.Errorf("%s", saved.Blocked)
+		if saved.BlockedAtMs > 0 {
+			r.blockedAt[key] = time.UnixMilli(saved.BlockedAtMs).UTC()
+		}
 	}
 	if saved.PendingCancels != nil {
 		r.pendingCancels[key] = *saved.PendingCancels
@@ -638,6 +663,9 @@ func (r *Reconciler) persist(ctx context.Context, key string) error {
 	state := persistedState{PendingCreates: r.pendingCreates[key]}
 	if blocked := r.blocked[key]; blocked != nil {
 		state.Blocked = blocked.Error()
+		if at, ok := r.blockedAt[key]; ok {
+			state.BlockedAtMs = at.UnixMilli()
+		}
 	}
 	if pending, ok := r.pendingCancels[key]; ok && len(pending.OrderIDs) > 0 {
 		copy := pending

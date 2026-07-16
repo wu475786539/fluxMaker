@@ -44,7 +44,14 @@ public final class EngineMain {
             AtomicReference<AppRuntime> heartbeatRuntime = new AtomicReference<>();
             AtomicLong activeVersionRef = new AtomicLong(), desiredVersionRef = new AtomicLong();
             AtomicReference<String> runtimeErrorRef = new AtomicReference<>("waiting for a published configuration");
-            Runtime.getRuntime().addShutdownHook(new Thread(() -> stopping.set(true), "shutdown"));
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                stopping.set(true);
+                // Release market leases immediately so a replacement instance can take
+                // over within seconds, instead of the new process waiting out the full
+                // lease TTL (minutes) because SIGKILL cut off the graceful shutdown path.
+                AppRuntime current = heartbeatRuntime.get();
+                if (current != null) try { current.engine.releaseLeases(); } catch (RuntimeException ignored) {}
+            }, "shutdown"));
             ScheduledExecutorService heartbeat = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "heartbeat"));
             heartbeat.scheduleAtFixedRate(() -> {
                 AppRuntime current = heartbeatRuntime.get();

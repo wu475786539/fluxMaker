@@ -91,6 +91,14 @@ docker compose up -d --build
 
 如果服务器安装的是旧版 Compose v1，使用 `docker-compose up -d --build`。出现 `unknown shorthand flag: 'd'` 通常表示当前 `docker` 命令没有 Compose v2 子命令。
 
+代码更新后需要明确删除旧应用容器、使用新镜像强制重建时，运行项目脚本：
+
+```bash
+./scripts/rebuild-local.sh
+```
+
+也可以运行 `make docker-rebuild`。脚本会先构建带唯一 `code_build` 标识的新镜像；只有构建成功后，才强制替换 `admin-api`、`fluxmaker` 和 `watchdog`，并自动清理孤儿容器。PostgreSQL、Redis 和数据卷不会删除或重建。启动日志中的 `code_build` 是程序构建版本，而 `published configuration applied, version=42` 中的 `42` 是数据库配置发布版本，两者互不相关。
+
 查看状态：
 
 ```bash
@@ -339,3 +347,36 @@ colima start
 docker-compose up -d --build
 docker-compose logs -f --tail=500 fluxmaker
 /opt/fluxmaker/current
+./deploy.sh root@168.144.132.3
+
+
+API_KEY='19af818fe5ff8eb5ffbcabbc096126251a09a45798f1a662870414a3e074d5b3'
+SECRET='8ec55e104f4450f3cc586e5f5f7018080df1dd8f7691bf95aa87a549ea3f4250'
+ORDERS='[{"symbol":"GDT_USDT","direction":"BUY","tradeType":"LIMIT","totalAmount":"1","price":"0.30"}]'
+
+TS=$(date +%s%3N)
+NONCE=$(openssl rand -hex 16)
+PAYLOAD="ordersJsonStr=${ORDERS}&timestamp=${TS}"
+SIG=$(printf '%s' "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $NF}')
+
+curl -sS -w '\nHTTP=%{http_code} total=%{time_total}\n' --max-time 20 -G \
+  -X POST 'https://open.mgbx.com/spot/v1/u/trade/order/batch/create' \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -H "X-Access-Key: ${API_KEY}" \
+  -H "X-Signature: ${SIG}" \
+  -H "X-Request-Timestamp: ${TS}" \
+  -H "X-Request-Nonce: ${NONCE}" \
+  --data-urlencode "ordersJsonStr=${ORDERS}"
+
+API_KEY='19af818fe5ff8eb5ffbcabbc096126251a09a45798f1a662870414a3e074d5b3'
+SECRET='8ec55e104f4450f3cc586e5f5f7018080df1dd8f7691bf95aa87a549ea3f4250'
+
+ORDERS='[{"symbol":"GDT_USDT","direction":"BUY","tradeType":"LIMIT","totalAmount":"0","price":"0.30"}]'
+TS=$(date +%s%3N); NONCE=$(openssl rand -hex 16)
+SIG=$(printf '%s' "ordersJsonStr=${ORDERS}&timestamp=${TS}" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $NF}')
+# 去掉 -G,参数进 body
+curl -sS -w '\ncode=%{http_code} t=%{time_total}\n' --max-time 20 -X POST \
+  'https://open.mgbx.com/spot/v1/u/trade/order/batch/create' \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -H "X-Access-Key: ${API_KEY}" -H "X-Signature: ${SIG}" -H "X-Request-Timestamp: ${TS}" -H "X-Request-Nonce: ${NONCE}" \
+  --data-urlencode "ordersJsonStr=${ORDERS}"

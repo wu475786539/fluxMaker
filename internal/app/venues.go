@@ -68,9 +68,12 @@ func buildVenuesIsolatedWithRegistry(ctx context.Context, cfg config.Config, cre
 	}
 	clients := make(map[string]venue.Client)
 	failures := make(map[string][]string)
+	// Venue REST calls (order placement/cancel) are slower and more critical than
+	// oracle RPC reads, so floor them at 8s even when request_timeout_ms is set low
+	// for the oracle. Order POSTs can't be safely retried, so give them room.
 	timeout := cfg.RequestTimeout()
-	if timeout <= 0 {
-		timeout = 5 * time.Second
+	if timeout < 8*time.Second {
+		timeout = 8 * time.Second
 	}
 	for name, venueCfg := range cfg.Venues {
 		if !venueCfg.Enabled {

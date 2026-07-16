@@ -1,4 +1,4 @@
-.PHONY: test test-java test-all test-integration vet build build-java compose-config compose-config-java
+.PHONY: test test-java test-all test-integration vet build build-java compose-config compose-config-java docker-rebuild
 
 test:
 	go test ./...
@@ -25,3 +25,6 @@ compose-config:
 
 compose-config-java:
 	BACKEND_IMPL=java docker-compose config -q
+
+docker-rebuild:
+	./scripts/rebuild-local.sh

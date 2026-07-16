@@ -68,7 +68,11 @@ public final class RuntimeFactory {
     public static VenueBuild buildVenuesIsolated(AppConfig config, CredentialService credentials) {
         Map<String, VenueClient> clients = new LinkedHashMap<>();
         Map<String, List<String>> failures = new LinkedHashMap<>();
-        Duration timeout = config.requestTimeout().isNegative() || config.requestTimeout().isZero() ? Duration.ofSeconds(5) : config.requestTimeout();
+        // Venue REST calls (order placement/cancel) are slower and more critical than
+        // oracle RPC reads, so floor them at 8s even when request_timeout_ms is set low
+        // for the oracle. Order POSTs can't be safely retried, so give them room.
+        Duration configured = config.requestTimeout();
+        Duration timeout = configured.compareTo(Duration.ofSeconds(8)) < 0 ? Duration.ofSeconds(8) : configured;
         config.venues.forEach((name, venue) -> {
             if (!venue.enabled) return;
             venue.markets.forEach((instrumentId, market) -> {

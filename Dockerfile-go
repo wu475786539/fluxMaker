@@ -17,6 +17,15 @@ RUN apk add --no-cache ca-certificates tzdata \
 COPY --from=build /out/fluxmaker /usr/local/bin/fluxmaker
 COPY --from=build /out/watchdog /usr/local/bin/watchdog
 COPY --from=build /out/admin-api /usr/local/bin/admin-api
+ARG FLUXMAKER_BUILD_ID=local
+ARG FLUXMAKER_BUILD_COMMIT=unknown
+ARG FLUXMAKER_BUILD_TIME=unknown
+ENV FLUXMAKER_BUILD_ID=${FLUXMAKER_BUILD_ID} \
+    FLUXMAKER_BUILD_COMMIT=${FLUXMAKER_BUILD_COMMIT} \
+    FLUXMAKER_BUILD_TIME=${FLUXMAKER_BUILD_TIME}
+LABEL org.opencontainers.image.version=${FLUXMAKER_BUILD_ID} \
+      org.opencontainers.image.revision=${FLUXMAKER_BUILD_COMMIT} \
+      org.opencontainers.image.created=${FLUXMAKER_BUILD_TIME}
 USER fluxmaker
 WORKDIR /var/lib/fluxmaker
 CMD ["/usr/local/bin/fluxmaker"]

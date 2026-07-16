@@ -27,10 +27,17 @@ public final class Reconciler {
     public static final String MANAGED_PREFIX = "fm-";
     private static final int MAX_MUTATIONS = 20, MAX_BATCH_CANCEL = 20;
     private static final Duration LOOKUP_DELAY = Duration.ofSeconds(2), CREATE_MAX_AGE = Duration.ofSeconds(30), CANCEL_RETRY_DELAY = Duration.ofSeconds(5);
+    // After an uncertain submit/cancel (e.g. a request timeout) we block the market
+    // so we don't blindly retry a batch that may have partially landed. Once this
+    // settle window passes the exchange has resolved the outcome, and the fresh
+    // openOrders we read each cycle is authoritative (managesAllOrders venues, or our
+    // deterministic clientId), so the block self-heals instead of wedging forever.
+    private static final Duration BLOCK_RECOVERY_DELAY = Duration.ofSeconds(15);
     private static final int MAX_CANCEL_ATTEMPTS = 3;
     private final RuntimeStore store;
     private final Clock clock;
     private final Map<String, String> blocked = new HashMap<>();
+    private final Map<String, Instant> blockedAt = new HashMap<>();
     private final Map<String, PendingCancelBatch> pendingCancels = new HashMap<>();
     private final Map<String, Map<String, PendingCreate>> pendingCreates = new HashMap<>();
     private final Map<String, Map<Domain.Side, PendingVacancy>> pendingVacancies = new HashMap<>();
@@ -65,6 +72,7 @@ public final class Reconciler {
     public static final class PendingVacancy { public int count; public Instant detectedAt; public Instant replenishAt; }
     public static final class PersistedState {
         public String blocked;
+        public Long blockedAtEpochMs;
         public PendingCancelBatch pendingCancels;
         public Map<String, PendingCreate> pendingCreates;
         public Map<Domain.Side, PendingVacancy> pendingVacancies;
@@ -105,7 +113,15 @@ public final class Reconciler {
                                                     int thresholdBps, List<Domain.Order> orders, WriteGuard guard,
                                                     long fenceGeneration, RefreshPolicy refresh,
                                                     boolean gradualMaterialReprice, ReplenishPolicy replenish) {
-        String key = stateKey(client, instrumentId); ensureLoaded(key); if (blocked.containsKey(key)) throw new IllegalStateException("venue market blocked after uncertain order state: " + blocked.get(key)); if (quotes.isEmpty()) throw new IllegalArgumentException("empty quote target");
+        String key = stateKey(client, instrumentId); ensureLoaded(key);
+        if (blocked.containsKey(key)) {
+            Instant since = blockedAt.getOrDefault(key, Instant.EPOCH);
+            if (Duration.between(since, clock.instant()).compareTo(BLOCK_RECOVERY_DELAY) < 0)
+                throw new IllegalStateException("venue market blocked after uncertain order state: " + blocked.get(key));
+            // Settle window elapsed: drop the block and resync against real openOrders below.
+            blocked.remove(key); blockedAt.remove(key); persist(key);
+        }
+        if (quotes.isEmpty()) throw new IllegalArgumentException("empty quote target");
         String symbol = quotes.getFirst().symbol; List<Domain.Order> managed = managedOrdersFor(client, orders);
         boolean waiting = waitingForCancelConfirmation(key, managed); persist(key); if (waiting) return new Result();
         List<PendingCreate> pending = activePendingCreates(client, key, symbol, managed);
@@ -394,7 +410,7 @@ public final class Reconciler {
         cancelOrders(client, symbol, managed, guard); setPendingCancels(key, managed.stream().map(order -> order.orderId).toList()); pendingCreates.remove(key); pendingVacancies.remove(key); immediateReplacementCredits.remove(key); persist(key); return managed.size();
     }
 
-    public synchronized void clearBlocked(VenueClient client, String instrumentId) { String key = stateKey(client, instrumentId); ensureLoaded(key); blocked.remove(key); persist(key); }
+    public synchronized void clearBlocked(VenueClient client, String instrumentId) { String key = stateKey(client, instrumentId); ensureLoaded(key); blocked.remove(key); blockedAt.remove(key); persist(key); }
     public static List<Domain.Order> managedOrdersFor(VenueClient client, List<Domain.Order> orders) { if (client.managesAllOrders()) return new ArrayList<>(orders); return orders.stream().filter(Reconciler::isManaged).toList(); }
     public static boolean isManaged(Domain.Order order) { return order.clientId != null && order.clientId.startsWith(MANAGED_PREFIX); }
     public static boolean withinBps(DecimalValue left, DecimalValue right, int threshold) { if (left.isZero() || right.isZero()) return false; return left.subtract(right).abs().multiply(DecimalValue.TEN_THOUSAND).compareTo(right.multiply(DecimalValue.of(threshold))) <= 0; }
@@ -405,9 +421,9 @@ public final class Reconciler {
     private static boolean active(Domain.OrderState state) { return state == Domain.OrderState.NEW || state == Domain.OrderState.PARTIALLY_FILLED || state == Domain.OrderState.UNKNOWN; }
     private static String stateKey(VenueClient client, String instrument) { return (client.stateIdentity() == null || client.stateIdentity().isEmpty() ? client.name() : client.stateIdentity()) + ":" + instrument; }
 
-    private void ensureLoaded(String key) { if (!loaded.add(key) || store == null) return; byte[] value = store.loadOmsState(key); if (value == null || value.length == 0) return; try { PersistedState saved = Json.read(value, PersistedState.class); if (saved.blocked != null && !saved.blocked.isEmpty()) blocked.put(key, saved.blocked); if (saved.pendingCancels != null) pendingCancels.put(key, saved.pendingCancels); if (saved.pendingCreates != null) pendingCreates.put(key, saved.pendingCreates); if (saved.pendingVacancies != null) pendingVacancies.put(key, saved.pendingVacancies); if (saved.immediateReplacementCredits != null) immediateReplacementCredits.put(key, saved.immediateReplacementCredits); if (saved.replenishmentInitialized) replenishmentInitialized.add(key); if (saved.replenishmentBootstrap) replenishmentBootstrap.add(key); } catch (RuntimeException e) { loaded.remove(key); throw e; } }
-    private void persist(String key) { if (store == null) return; PersistedState state = new PersistedState(); state.blocked = blocked.get(key); state.pendingCancels = pendingCancels.get(key); state.pendingCreates = pendingCreates.get(key); state.pendingVacancies = pendingVacancies.get(key); state.immediateReplacementCredits = immediateReplacementCredits.get(key); state.replenishmentInitialized = replenishmentInitialized.contains(key); state.replenishmentBootstrap = replenishmentBootstrap.contains(key); if ((state.blocked == null || state.blocked.isEmpty()) && state.pendingCancels == null && (state.pendingCreates == null || state.pendingCreates.isEmpty()) && (state.pendingVacancies == null || state.pendingVacancies.isEmpty()) && (state.immediateReplacementCredits == null || state.immediateReplacementCredits.isEmpty()) && !state.replenishmentInitialized && !state.replenishmentBootstrap) store.deleteOmsState(key); else store.saveOmsState(key, Json.writeBytes(state)); }
-    private void block(String key, String error) { blocked.put(key, error); persist(key); }
+    private void ensureLoaded(String key) { if (!loaded.add(key) || store == null) return; byte[] value = store.loadOmsState(key); if (value == null || value.length == 0) return; try { PersistedState saved = Json.read(value, PersistedState.class); if (saved.blocked != null && !saved.blocked.isEmpty()) { blocked.put(key, saved.blocked); blockedAt.put(key, saved.blockedAtEpochMs != null ? Instant.ofEpochMilli(saved.blockedAtEpochMs) : Instant.EPOCH); } if (saved.pendingCancels != null) pendingCancels.put(key, saved.pendingCancels); if (saved.pendingCreates != null) pendingCreates.put(key, saved.pendingCreates); if (saved.pendingVacancies != null) pendingVacancies.put(key, saved.pendingVacancies); if (saved.immediateReplacementCredits != null) immediateReplacementCredits.put(key, saved.immediateReplacementCredits); if (saved.replenishmentInitialized) replenishmentInitialized.add(key); if (saved.replenishmentBootstrap) replenishmentBootstrap.add(key); } catch (RuntimeException e) { loaded.remove(key); throw e; } }
+    private void persist(String key) { if (store == null) return; PersistedState state = new PersistedState(); state.blocked = blocked.get(key); state.blockedAtEpochMs = blockedAt.containsKey(key) ? blockedAt.get(key).toEpochMilli() : null; state.pendingCancels = pendingCancels.get(key); state.pendingCreates = pendingCreates.get(key); state.pendingVacancies = pendingVacancies.get(key); state.immediateReplacementCredits = immediateReplacementCredits.get(key); state.replenishmentInitialized = replenishmentInitialized.contains(key); state.replenishmentBootstrap = replenishmentBootstrap.contains(key); if ((state.blocked == null || state.blocked.isEmpty()) && state.pendingCancels == null && (state.pendingCreates == null || state.pendingCreates.isEmpty()) && (state.pendingVacancies == null || state.pendingVacancies.isEmpty()) && (state.immediateReplacementCredits == null || state.immediateReplacementCredits.isEmpty()) && !state.replenishmentInitialized && !state.replenishmentBootstrap) store.deleteOmsState(key); else store.saveOmsState(key, Json.writeBytes(state)); }
+    private void block(String key, String error) { blocked.put(key, error); blockedAt.put(key, clock.instant()); persist(key); }
 
     public static String clientId(String instrumentId, Domain.Quote quote, long generation) {
         String seed = instrumentId + "|" + quote.venue + "|" + quote.side + "|" + quote.level + "|" + generation + "|" + System.nanoTime();

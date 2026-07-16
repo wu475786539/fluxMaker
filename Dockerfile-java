@@ -31,7 +31,17 @@ COPY internal/database/migrations /app/migrations
 COPY internal/adminapi/web /app/web
 COPY java/docker/admin-api java/docker/fluxmaker java/docker/watchdog /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/admin-api /usr/local/bin/fluxmaker /usr/local/bin/watchdog
-ENV MIGRATIONS_DIR=/app/migrations WEB_ROOT=/app/web
+ARG FLUXMAKER_BUILD_ID=local
+ARG FLUXMAKER_BUILD_COMMIT=unknown
+ARG FLUXMAKER_BUILD_TIME=unknown
+ENV MIGRATIONS_DIR=/app/migrations \
+    WEB_ROOT=/app/web \
+    FLUXMAKER_BUILD_ID=${FLUXMAKER_BUILD_ID} \
+    FLUXMAKER_BUILD_COMMIT=${FLUXMAKER_BUILD_COMMIT} \
+    FLUXMAKER_BUILD_TIME=${FLUXMAKER_BUILD_TIME}
+LABEL org.opencontainers.image.version=${FLUXMAKER_BUILD_ID} \
+      org.opencontainers.image.revision=${FLUXMAKER_BUILD_COMMIT} \
+      org.opencontainers.image.created=${FLUXMAKER_BUILD_TIME}
 ENTRYPOINT []
 USER fluxmaker
 WORKDIR /var/lib/fluxmaker

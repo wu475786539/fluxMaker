@@ -243,6 +243,25 @@ wait_until_ready() {
     return 1
 }
 
+clear_stale_market_leases() {
+    # An instance that was SIGKILLed before releasing its market leases would leave
+    # them in Redis and block the new engine until the lease TTL (minutes, in live
+    # mode). Deleting them here is safe: the live engine simply re-acquires on its
+    # next tick with a fresh fence generation. Best-effort — never fails the deploy.
+    local password
+    password="$(env_value REDIS_PASSWORD "$ENV_FILE")"
+    if [[ -z "$password" ]]; then
+        log "跳过陈旧租约清理：未找到 REDIS_PASSWORD"
+        return 0
+    fi
+    if compose "$RELEASE_ID" exec -T -e RP="$password" redis sh -c \
+        'redis-cli -a "$RP" --no-auth-warning --scan --pattern "fluxmaker:lease:market:*" | while read -r key; do redis-cli -a "$RP" --no-auth-warning DEL "$key" >/dev/null; done' >/dev/null 2>&1; then
+        log "已清理陈旧的 market 租约"
+    else
+        log "陈旧租约清理未执行（忽略，租约会在 TTL 到期后自愈）"
+    fi
+}
+
 rollback() {
     local previous="$1"
     [[ -n "$previous" && -d "$previous" ]] || return 0
@@ -336,6 +355,9 @@ if ! wait_until_ready; then
     discard_failed_release "$previous_release"
     fail "服务在 5 分钟内没有就绪"
 fi
+
+log "清理旧实例可能残留的 market 租约"
+clear_stale_market_leases
 
 ln -sfn "$RELEASE_DIR" "$CURRENT_LINK"
 prune_releases

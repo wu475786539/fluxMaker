@@ -1607,11 +1607,11 @@ func (e *Engine) cancelManagedFenced(ctx context.Context, venueName, instrumentI
 
 func (e *Engine) Shutdown(ctx context.Context) error {
 	var failures []string
-	for _, instrument := range e.cfg.Instruments {
-		if err := e.cancelInstrument(ctx, instrument); err != nil {
-			failures = append(failures, instrument.ID+": "+err.Error())
-		}
-	}
+	// Release market leases first (Redis-only, fast) so a replacement instance can
+	// take over immediately, instead of waiting out the lease TTL (minutes) because a
+	// slow exchange cancel below burned the shutdown budget and the process got
+	// SIGKILLed before reaching this point. cancelInstrument re-acquires per market as
+	// needed; a successor that already grabbed the lease simply adopts the orders.
 	e.leaseMu.RLock()
 	heldLeases := make(map[string]uint64, len(e.heldLeases))
 	for key, generation := range e.heldLeases {
@@ -1623,11 +1623,15 @@ func (e *Engine) Shutdown(ctx context.Context) error {
 			failures = append(failures, "lease "+key+": "+err.Error())
 		}
 	}
-	if len(failures) > 0 {
-		_ = e.audit.Flush()
-		return fmt.Errorf("shutdown cancel failures: %s", strings.Join(failures, "; "))
+	for _, instrument := range e.cfg.Instruments {
+		if err := e.cancelInstrument(ctx, instrument); err != nil {
+			failures = append(failures, instrument.ID+": "+err.Error())
+		}
 	}
 	_ = e.audit.Flush()
+	if len(failures) > 0 {
+		return fmt.Errorf("shutdown cancel failures: %s", strings.Join(failures, "; "))
+	}
 	return nil
 }
 
