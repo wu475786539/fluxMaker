@@ -5,6 +5,9 @@ import com.fluxmaker.domain.Domain;
 import com.fluxmaker.math.DecimalValue;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -53,6 +56,34 @@ class TradeSimulatorTest {
         assertNull(result.fill());
         assertEquals("skipped", result.snapshot().status);
         assertTrue(result.snapshot().error.contains("strictly inside bid/ask"));
+    }
+
+    @Test void logsWhySimulationIsSkippedWhenNoTickExistsInsideTheBook() {
+        AppConfig.InstrumentConfig instrument = instrument();
+        AppConfig.VenueMarketConfig market = market();
+        Domain.Book book = new Domain.Book();
+        book.bidPrice = DecimalValue.parse("100");
+        book.askPrice = DecimalValue.parse("101");
+        TradeSimulator simulator = new TradeSimulator(new VolumeSimulationPlannerImpl());
+        Instant start = Instant.parse("2026-07-14T00:00:00Z");
+        simulator.observe(instrument, "v", market, book, start);
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        PrintStream previous = System.out;
+        TradeSimulator.Observation result;
+        try {
+            System.setOut(new PrintStream(output, true, StandardCharsets.UTF_8));
+            result = simulator.observe(instrument, "v", market, book, start.plusMillis(100));
+        } finally {
+            System.setOut(previous);
+        }
+
+        assertNull(result.fill());
+        assertEquals("skipped", result.snapshot().status);
+        assertEquals("买一和卖一之间没有合法价格 Tick", result.snapshot().error);
+        assertTrue(output.toString(StandardCharsets.UTF_8).contains(
+                "[volume-simulation] skipped instrument=A-B source_venue=v symbol=AB sequence=1 "
+                        + "bid=100 ask=101 error=买一和卖一之间没有合法价格 Tick"));
     }
 
     private static AppConfig.InstrumentConfig instrument() {
