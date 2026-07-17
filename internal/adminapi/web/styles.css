@@ -403,6 +403,15 @@ h1, h2, h3, h4, p { margin-top: 0; }
 .pause-notice strong, .pause-notice p { display: block; }
 .pause-notice strong { color: var(--warning); font-size: 10px; }
 .pause-notice p { margin: 3px 0 0; color: #ad9d7d; font-size: 9px; }
+.book-rebuild-notice { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; padding: 12px 15px; border: 1px solid rgba(85, 214, 169, .2); border-radius: 10px; background: rgba(85, 214, 169, .055); }
+.book-rebuild-notice > span { display: grid; place-items: center; width: 29px; height: 29px; border-radius: 9px; background: rgba(85, 214, 169, .1); color: var(--primary); font-weight: 850; }
+.book-rebuild-notice strong, .book-rebuild-notice p { display: block; }
+.book-rebuild-notice strong { color: var(--primary); font-size: 10px; }
+.book-rebuild-notice p { margin: 3px 0 0; color: #91bfae; font-size: 9px; }
+.book-rebuild-notice.pending { border-color: rgba(242, 197, 107, .2); background: rgba(242, 197, 107, .055); }
+.book-rebuild-notice.pending > span, .book-rebuild-notice.pending strong { color: var(--warning); }
+.book-rebuild-notice.failed { border-color: rgba(255, 130, 149, .2); background: rgba(255, 130, 149, .055); }
+.book-rebuild-notice.failed > span, .book-rebuild-notice.failed strong { color: var(--danger); }
 .runtime-metrics { margin-bottom: 14px; }
 .runtime-venue-stack { display: grid; gap: 14px; }
 .runtime-venue .market-head { display: flex; align-items: center; justify-content: space-between; gap: 15px; }

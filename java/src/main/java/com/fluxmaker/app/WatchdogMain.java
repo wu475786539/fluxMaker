@@ -21,6 +21,7 @@ public final class WatchdogMain {
     private WatchdogMain() {}
 
     public static void main(String[] args) {
+        TimestampedStreams.install();
         boolean once = java.util.Arrays.asList(args).contains("--once") || java.util.Arrays.asList(args).contains("-once");
         try { run(once); }
         catch (RuntimeException e) { System.err.println("watchdog stopped: " + EngineMain.rootMessage(e)); System.exit(1); }

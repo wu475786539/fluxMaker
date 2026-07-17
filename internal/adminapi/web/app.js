@@ -468,15 +468,18 @@ function runtimeTab(pair) {
   const pausePending = snapshot.status === "pausing";
   const resumePending = snapshot.status === "resuming";
   const pauseRequested = snapshot.paused || pausePending;
+  const rebuildPending = snapshot.book_rebuild?.status === "pending";
   const controls = `<div class="runtime-actions">
     ${pauseRequested && has("runtime:start") ? `<button class="btn primary" data-runtime-action="resume" data-id="${esc(pair.id)}">开启币对</button>` : ""}
     ${!pauseRequested && !resumePending && has("runtime:stop") ? `<button class="btn" data-runtime-action="pause" data-id="${esc(pair.id)}">关闭币对</button>` : ""}
     ${has("runtime:emergency_cancel") ? `<button class="btn danger" data-runtime-action="emergency-cancel" data-id="${esc(pair.id)}">紧急暂停并撤单</button>` : ""}
     ${has("runtime:start") ? `<button class="btn" data-runtime-action="reconcile" data-id="${esc(pair.id)}">对账并解除阻断</button>` : ""}
+    ${has("runtime:start") && snapshot.mode === "live" ? `<button class="btn primary" data-runtime-action="rebuild-book" data-id="${esc(pair.id)}" ${rebuildPending ? "disabled" : ""}>${rebuildPending ? "盘口重建处理中…" : "启动盘口重建"}</button>` : ""}
   </div>`;
   return `
     <div class="runtime-detail-head"><div><span class="eyebrow">LIVE SNAPSHOT</span><h2>${esc(pair.base.symbol)}/${esc(pair.quote.symbol)} ${runtimeBadge(snapshot)}</h2><p>快照更新于 ${formatRelative(snapshot.updated_at)} · 总耗时 ${snapshot.tick_duration_ms || 0}ms · 链上 ${snapshot.reference_duration_ms || 0}ms · 余额 ${snapshot.balance_duration_ms || 0}ms</p></div>${controls}</div>
     ${snapshot.pause ? `<div class="pause-notice"><span>Ⅱ</span><div><strong>${snapshot.paused ? "币对已暂停" : "暂停撤单指令处理中"}</strong><p>原因：${esc(snapshot.pause.reason)} · 请求时间 ${formatDate(snapshot.pause.requested_at)}</p></div></div>` : resumePending ? `<div class="pause-notice"><span>↻</span><div><strong>正在恢复报价</strong><p>等待引擎加载最新配置并生成新的运行快照。</p></div></div>` : ""}
+    ${bookRebuildNotice(snapshot.book_rebuild)}
     ${snapshot.error ? `<div class="runtime-error prominent">${esc(snapshot.error)}</div>` : ""}
     <div class="metrics runtime-metrics">
       ${metric("Pancake 指数价", reference?.price || "—", reference ? `${reference.confidence} · 区块 ${reference.block_number}` : "等待链上价格")}
@@ -485,6 +488,16 @@ function runtimeTab(pair) {
       ${metric("最大库存偏差", snapshot.max_base_deviation ?? pair.strategy.max_base_deviation, snapshot.mode === "live" ? "实盘风控" : "Shadow 观察")}
     </div>
     ${(snapshot.venues || []).length ? `<div class="runtime-venue-stack">${snapshot.venues.map(runtimeVenuePanel).join("")}</div>` : emptyState("等待首个运行快照", "引擎成功加载最新配置后，会写入指数价、盘口和账户数据。", "刷新", "refresh-runtime")}`;
+}
+
+function bookRebuildNotice(status) {
+  if (!status) return "";
+  const pending = status.status === "pending";
+  const failed = status.status === "failed";
+  const title = pending ? "盘口重建指令处理中" : failed ? "盘口重建失败" : "盘口重建已完成";
+  const icon = pending ? "↻" : failed ? "!" : "✓";
+  const time = status.completed_at || status.requested_at;
+  return `<div class="book-rebuild-notice ${esc(status.status || "pending")}"><span>${icon}</span><div><strong>${title}</strong><p>${esc(status.message || "等待执行结果")}${status.placed ? ` · 已确认挂出 ${esc(status.placed)} 笔` : ""}${time ? ` · ${formatDate(time)}` : ""}</p></div></div>`;
 }
 
 function runtimeVenuePanel(venue) {
@@ -719,6 +732,11 @@ function strategyTab(pair, index) {
         ${boundedNumberField("最长补单延迟（秒）", `${path}.fill_replenish_max_delay_seconds`, strategy.fill_replenish_max_delay_seconds ?? 8, editable, 1, 3600, "每个方向在范围内随机；实际执行取决于下一次引擎轮询")}
       </div>
       <div class="inline-note">默认随机等待 3～8 秒，每轮最多补回 2 档。系统主动渐进轮换产生的缺口不等待，价格保护和故障撤单逻辑也不受影响。</div>
+      <div class="section-heading compact-heading"><span>⟳</span><div><h2>盘口启动重建</h2><p>服务启动或异常恢复后，如果确认交易所为空盘/单边盘，并且账户没有本系统受管订单，则从指数价附近重新种下首档。</p></div></div>
+      <div class="form-grid">
+        ${boundCheck("启用盘口启动重建", `${path}.startup_book_rebuild_enabled`, strategy.startup_book_rebuild_enabled ?? true, editable)}
+      </div>
+      <div class="inline-note">默认开启。首轮只提交买一、卖一各 1 笔；后续深层档位继续遵守上面的补单延迟，并且每轮最多补 2 笔。盘口接口读取失败、参考价过期、余额不足或价格保护不通过时不会启动重建。</div>
     </section>
     <aside class="panel guidance"><span class="guide-icon">↕</span><h3>报价说明</h3><p>半点差决定第一档距离指数价的位置；后续档位按档位间距向外展开。</p><code>买一 = 指数价 − 半点差</code><code>卖一 = 指数价 ＋ 半点差</code><code>数量 = 随机${esc(quoteSymbol)}金额 ÷ 该档价格</code><code>最外档距离 = ${esc(outermostSpread)} bps</code><p>同一档位的随机目标金额保持稳定，避免行情轮询导致无意义撤挂。每个市场目标 ${ordersPerMarket} 张订单；当前 ${enabledMarketCount} 个已启用市场合计 ${totalTargetOrders} 张。订单按每轮最多 20 张滚动撤挂，避免限频和整片盘口瞬间消失。</p></aside>
     <section class="panel form-panel span-2">
@@ -1277,7 +1295,7 @@ async function createPair(event) {
     base: { symbol: base, address: body.base_address.trim(), decimals: 18 },
     quote: { symbol: quote, address: body.quote_address.trim(), decimals: 18 },
     reference: { type: "pancake_v2", legs: [], twap_window_seconds: 60, max_spot_twap_deviation_bps: 200, stale_after_seconds: 20, allow_spot_during_warmup: state.draft.mode !== "live" },
-    strategy: { half_spread_bps: 50, level_spacing_bps: 25, levels: 20, min_order_notional: "10", max_order_notional: "20", reprice_threshold_bps: 10, balance_reserve_bps: 500, max_venue_reference_deviation_bps: 500, max_venue_spread_bps: 1000, target_base: "0", max_base_deviation: "100", inventory_skew_bps: 30, quote_refresh_seconds: 45, quote_refresh_ratio_bps: 1000, min_order_lifetime_seconds: 30, max_order_lifetime_seconds: 300, fill_replenish_min_delay_seconds: 3, fill_replenish_max_delay_seconds: 8, price_jitter_ticks: 2, best_levels: 3, best_level_refresh_seconds: 90 },
+    strategy: { half_spread_bps: 50, level_spacing_bps: 25, levels: 20, min_order_notional: "10", max_order_notional: "20", reprice_threshold_bps: 10, balance_reserve_bps: 500, max_venue_reference_deviation_bps: 500, max_venue_spread_bps: 1000, target_base: "0", max_base_deviation: "100", inventory_skew_bps: 30, quote_refresh_seconds: 45, quote_refresh_ratio_bps: 1000, min_order_lifetime_seconds: 30, max_order_lifetime_seconds: 300, fill_replenish_min_delay_seconds: 3, fill_replenish_max_delay_seconds: 8, price_jitter_ticks: 2, best_levels: 3, best_level_refresh_seconds: 90, startup_book_rebuild_enabled: true },
     trade_simulation: { enabled: false, source_venue: "", min_quantity: "1", max_quantity: "10", min_interval_ms: 1000, max_interval_ms: 3000, buy_probability_bps: 5000, recent_limit: 50 },
   };
   state.draft.instruments.push(pair);
@@ -1491,7 +1509,8 @@ function controlRuntime(action, instrumentID) {
     pause: { title: `关闭 ${instrumentID}`, body: "停止铺新单；已挂出的订单继续留在盘口。重启后保持关闭。", label: "关闭币对", danger: false },
     resume: { title: `开启 ${instrumentID}`, body: "引擎将在下一轮继续铺单。", label: "开启币对", danger: false },
     "emergency-cancel": { title: `紧急暂停并撤单 ${instrumentID}`, body: "立即停止铺单，并撤销该币对的全部受管挂单。", label: "紧急撤单", danger: true },
-    reconcile: { title: `对账 ${instrumentID}`, body: "执行安全撤单、订单对账，并解除 OMS 阻断。", label: "开始对账", danger: false },
+    reconcile: { title: `对账 ${instrumentID}`, body: "查询当前挂单并解除 OMS 阻断，不撤销现有订单。", label: "开始对账", danger: false },
+    "rebuild-book": { title: `启动盘口重建 ${instrumentID}`, body: "读取最新链上指数价，在当前点差内用 Post-Only 补齐买一、卖一首档；不会撤销现有订单。仍会校验参考价有效期、余额、交易精度、最小金额和挂单上限。", label: "确认挂出首档", danger: true },
   }[action];
   if (!meta) return;
   state.ui.confirm = { ...meta, action, instrumentID };
@@ -1510,6 +1529,7 @@ async function runControl() {
       reconcile: "对账解除指令已提交",
       pause: "已关闭：停止铺单，挂单保留",
       "emergency-cancel": "紧急撤单指令已提交，等待引擎确认",
+      "rebuild-book": "盘口重建指令已提交，请在运行状态查看结果",
     };
     toast(done[request.action] || "指令已提交");
     await loadRuntime();
@@ -1773,9 +1793,9 @@ function spreadBps(bid, ask) {
 function bookDisplayState(book) {
   const hasBid = isPositiveDecimal(book?.bid_price);
   const hasAsk = isPositiveDecimal(book?.ask_price);
-  if (!book) return { hasBid, hasAsk, twoSided: false, label: "盘口接口不可用 · 按指数价铺单" };
-  if (!hasBid && !hasAsk) return { hasBid, hasAsk, twoSided: false, label: "空盘口 · 按指数价铺单" };
-  if (!hasBid || !hasAsk) return { hasBid, hasAsk, twoSided: false, label: "单边盘口 · 按指数价补单" };
+  if (!book) return { hasBid, hasAsk, twoSided: false, label: "盘口接口不可用 · 停止写入" };
+  if (!hasBid && !hasAsk) return { hasBid, hasAsk, twoSided: false, label: "空盘口 · 等待启动重建" };
+  if (!hasBid || !hasAsk) return { hasBid, hasAsk, twoSided: false, label: "单边盘口 · 等待启动重建" };
   return { hasBid, hasAsk, twoSided: true, label: formatRelative(book.timestamp) };
 }
 

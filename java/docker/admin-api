@@ -1,6 +1,6 @@
 #!/bin/sh
 # See java/docker/fluxmaker for why: cap idle HTTP keep-alive reuse below MGBX's CDN
 # idle timeout so we don't reuse silently-closed connections. Overridable via JAVA_OPTS.
-printf 'admin-api starting: code_build=%s commit=%s built_at=%s\n' \
-  "${FLUXMAKER_BUILD_ID:-unknown}" "${FLUXMAKER_BUILD_COMMIT:-unknown}" "${FLUXMAKER_BUILD_TIME:-unknown}"
+printf '%s admin-api starting: code_build=%s commit=%s built_at=%s\n' \
+  "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${FLUXMAKER_BUILD_ID:-unknown}" "${FLUXMAKER_BUILD_COMMIT:-unknown}" "${FLUXMAKER_BUILD_TIME:-unknown}"
 exec java -Djdk.httpclient.keepalive.timeout=15 ${JAVA_OPTS:-} -cp '/app/fluxmaker-java.jar:/app/lib/*' com.fluxmaker.app.AdminApiMain "$@"

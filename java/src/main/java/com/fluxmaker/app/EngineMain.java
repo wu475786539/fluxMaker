@@ -22,6 +22,7 @@ public final class EngineMain {
     private EngineMain() {}
 
     public static void main(String[] args) {
+        TimestampedStreams.install();
         boolean once = java.util.Arrays.asList(args).contains("--once") || java.util.Arrays.asList(args).contains("-once");
         try { run(once); }
         catch (RuntimeException e) { System.err.println("fluxmaker stopped: " + rootMessage(e)); System.exit(1); }
@@ -109,9 +110,24 @@ public final class EngineMain {
                                             runtimeStore.setAppliedVersion(activeVersion);
                                             System.out.println("published configuration applied, version=" + activeVersion + ", blocked=" + runtime.engine.blockedInstruments());
                                         } catch (RuntimeException e) {
-                                            runtimeErrorRef.set("version v" + snapshot.version + " preflight pending: " + rootMessage(e));
-                                            if (!rootMessage(e).toLowerCase().contains("twap warming")) { pendingRuntime = null; pendingVersion = 0; }
-                                            System.err.println(runtimeErrorRef.get());
+                                            String preflightError = rootMessage(e);
+                                            if (shouldActivateDegradedRuntime(runtime != null, pendingRuntime.engine.blockedInstruments())) {
+                                                // On a cold start there may be no runnable instrument because the
+                                                // venue book itself needs a manual repair. Keep the engine in a
+                                                // write-blocked control-plane mode so runtime actions (especially
+                                                // manual book rebuild) can still be processed. Each instrument stays
+                                                // protected by preflightBlocked until recovery succeeds.
+                                                runtime = pendingRuntime; activeVersion = snapshot.version; activeRawConfig = snapshot.config;
+                                                pendingRuntime = null; pendingVersion = 0;
+                                                runtimeErrorRef.set("version v" + snapshot.version + " running degraded: " + preflightError);
+                                                nextRun = Instant.EPOCH; nextRules = now.plusSeconds(runtime.config.rulesRefreshSeconds);
+                                                nextBlockedRetry = now.plusSeconds(30); runtimeStore.setAppliedVersion(activeVersion);
+                                                System.err.println(runtimeErrorRef.get());
+                                            } else {
+                                                runtimeErrorRef.set("version v" + snapshot.version + " preflight pending: " + preflightError);
+                                                if (!preflightError.toLowerCase().contains("twap warming")) { pendingRuntime = null; pendingVersion = 0; }
+                                                System.err.println(runtimeErrorRef.get());
+                                            }
                                         }
                                     }
                                 }
@@ -124,7 +140,7 @@ public final class EngineMain {
                         }
                     }
                     if (runtime != null && !now.isBefore(nextControl)) {
-                        try { runtime.engine.applyControls(); } catch (RuntimeException e) { System.err.println("apply runtime controls failed: " + rootMessage(e)); }
+                        try { runtime.engine.applyControls(); clearDegradedErrorIfRecovered(runtimeErrorRef, runtime); } catch (RuntimeException e) { System.err.println("apply runtime controls failed: " + rootMessage(e)); }
                         nextControl = now.plusMillis(500);
                     }
                     if (runtime != null && !now.isBefore(nextRules)) {
@@ -133,7 +149,7 @@ public final class EngineMain {
                         nextRules = now.plusSeconds(runtime.config.rulesRefreshSeconds);
                     }
                     if (runtime != null && !now.isBefore(nextBlockedRetry)) {
-                        try { int recovered = runtime.retryBlocked(); if (recovered > 0) System.out.println("blocked instruments recovered=" + recovered); }
+                        try { int recovered = runtime.retryBlocked(); if (recovered > 0) System.out.println("blocked instruments recovered=" + recovered); clearDegradedErrorIfRecovered(runtimeErrorRef, runtime); }
                         catch (RuntimeException e) { System.err.println("blocked instruments remain degraded: " + rootMessage(e)); }
                         nextBlockedRetry = now.plusSeconds(30);
                     }
@@ -154,5 +170,13 @@ public final class EngineMain {
     static String rootMessage(Throwable error) {
         Throwable current = error; while (current.getCause() != null) current = current.getCause();
         return current.getMessage() == null ? current.toString() : current.getMessage();
+    }
+
+    static boolean shouldActivateDegradedRuntime(boolean hasActiveRuntime, java.util.Map<String, String> blocked) {
+        return !hasActiveRuntime && blocked != null && !blocked.isEmpty();
+    }
+
+    private static void clearDegradedErrorIfRecovered(AtomicReference<String> runtimeError, AppRuntime runtime) {
+        if (runtime.engine.blockedInstruments().isEmpty() && runtimeError.get().contains(" running degraded: ")) runtimeError.set("");
     }
 }

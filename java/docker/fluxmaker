@@ -4,6 +4,6 @@
 # connections after ~60s, so the default made us reuse dead sockets → "request timed
 # out" / "header parser received no bytes". Cap it well below the CDN idle so stale
 # connections are dropped before reuse. Placed before JAVA_OPTS so it can be overridden.
-printf 'fluxmaker starting: code_build=%s commit=%s built_at=%s\n' \
-  "${FLUXMAKER_BUILD_ID:-unknown}" "${FLUXMAKER_BUILD_COMMIT:-unknown}" "${FLUXMAKER_BUILD_TIME:-unknown}"
+printf '%s fluxmaker starting: code_build=%s commit=%s built_at=%s\n' \
+  "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${FLUXMAKER_BUILD_ID:-unknown}" "${FLUXMAKER_BUILD_COMMIT:-unknown}" "${FLUXMAKER_BUILD_TIME:-unknown}"
 exec java -Djdk.httpclient.keepalive.timeout=15 ${JAVA_OPTS:-} -cp '/app/fluxmaker-java.jar:/app/lib/*' com.fluxmaker.app.EngineMain "$@"

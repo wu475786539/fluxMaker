@@ -62,6 +62,16 @@ services:
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD}
       REDIS_DB: "0"
+      REDIS_TIMEOUT_MS: ${ADMIN_REDIS_TIMEOUT_MS:-2000}
+      DB_CONNECT_TIMEOUT_SECONDS: ${ADMIN_DB_CONNECT_TIMEOUT_SECONDS:-2}
+      DB_LOGIN_TIMEOUT_SECONDS: ${ADMIN_DB_LOGIN_TIMEOUT_SECONDS:-2}
+      DB_SOCKET_TIMEOUT_SECONDS: ${ADMIN_DB_SOCKET_TIMEOUT_SECONDS:-3}
+      DB_QUERY_TIMEOUT_SECONDS: ${ADMIN_DB_QUERY_TIMEOUT_SECONDS:-2}
+      DB_CANCEL_TIMEOUT_SECONDS: ${ADMIN_DB_CANCEL_TIMEOUT_SECONDS:-2}
+      ADMIN_SELF_CHECK_STARTUP_GRACE_SECONDS: ${ADMIN_SELF_CHECK_STARTUP_GRACE_SECONDS:-30}
+      ADMIN_SELF_CHECK_INTERVAL_SECONDS: ${ADMIN_SELF_CHECK_INTERVAL_SECONDS:-15}
+      ADMIN_SELF_CHECK_TIMEOUT_SECONDS: ${ADMIN_SELF_CHECK_TIMEOUT_SECONDS:-2}
+      ADMIN_SELF_CHECK_FAILURES: ${ADMIN_SELF_CHECK_FAILURES:-3}
       ADMIN_ADDR: :8080
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@fluxmaker.local}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
@@ -76,10 +86,11 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/readyz"]
-      interval: 5s
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/livez"]
+      interval: 10s
       timeout: 3s
-      retries: 20
+      retries: 3
+      start_period: 30s
     read_only: true
     tmpfs:
       - /tmp

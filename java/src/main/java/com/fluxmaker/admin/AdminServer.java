@@ -41,10 +41,16 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 public final class AdminServer implements AutoCloseable {
     private static final long MAX_BODY = 2L << 20;
+    private static final int HTTP_CORE_THREADS = 8;
+    private static final int HTTP_MAX_THREADS = 32;
+    private static final int HTTP_QUEUE_CAPACITY = 64;
     private final Database database;
     private final RedisClient redis;
     private final AuthService auth;
@@ -54,22 +60,46 @@ public final class AdminServer implements AutoCloseable {
     private final String metricsToken;
     private final Path webRoot;
     private final HttpServer server;
+    private final ExecutorService executor;
 
     public AdminServer(String address, Database database, RedisClient redis, AuthService auth, ConfigStore configs,
                        CredentialService credentials, RuntimeStore runtime, String metricsToken, Path webRoot) {
         this.database = database; this.redis = redis; this.auth = auth; this.configs = configs; this.credentials = credentials; this.runtime = runtime;
         this.metricsToken = metricsToken == null ? "" : metricsToken.trim(); this.webRoot = webRoot;
+        ExecutorService createdExecutor = newHttpExecutor();
         try {
             HostPort bind = HostPort.parse(address);
             server = HttpServer.create(new InetSocketAddress(bind.host, bind.port), 0);
             server.createContext("/", this::handle);
-            server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
-        } catch (IOException e) { throw new IllegalStateException("create admin server", e); }
+            server.setExecutor(createdExecutor);
+            executor = createdExecutor;
+        } catch (IOException e) {
+            createdExecutor.shutdownNow();
+            throw new IllegalStateException("create admin server", e);
+        }
     }
 
     public void start() { server.start(); }
     public int port() { return server.getAddress().getPort(); }
-    @Override public void close() { server.stop(2); }
+    @Override public void close() {
+        server.stop(2);
+        executor.shutdownNow();
+        try { executor.awaitTermination(2, TimeUnit.SECONDS); }
+        catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+    }
+
+    static ExecutorService newHttpExecutor() {
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(
+                HTTP_CORE_THREADS,
+                HTTP_MAX_THREADS,
+                60,
+                TimeUnit.SECONDS,
+                new ArrayBlockingQueue<>(HTTP_QUEUE_CAPACITY),
+                Thread.ofPlatform().name("admin-http-", 0).factory(),
+                new ThreadPoolExecutor.AbortPolicy());
+        executor.allowCoreThreadTimeOut(true);
+        return executor;
+    }
 
     private void handle(HttpExchange exchange) {
         long started = System.nanoTime(); int status = 500;
@@ -78,11 +108,35 @@ public final class AdminServer implements AutoCloseable {
         exchange.getResponseHeaders().set("Cache-Control", "no-store");
         exchange.getResponseHeaders().set("X-Request-ID", "req-" + System.currentTimeMillis() + "-" + Math.abs(System.nanoTime()));
         try { status = dispatch(exchange); }
-        catch (ApiError e) { status = sendError(exchange, e.status, e.getMessage()); }
-        catch (AuthService.InvalidCredentials e) { status = sendError(exchange, 401, "authentication required"); }
-        catch (IllegalArgumentException e) { status = sendError(exchange, 400, e.getMessage()); }
-        catch (RuntimeException e) { e.printStackTrace(System.err); status = sendError(exchange, 500, "internal server error"); }
-        finally { exchange.close(); long elapsed = (System.nanoTime() - started) / 1_000_000; if (status >= 400 || elapsed > 1000) System.out.println(exchange.getRequestMethod() + " " + exchange.getRequestURI().getPath() + " status=" + status + " duration_ms=" + elapsed); }
+        catch (ApiError e) { status = errorResponse(exchange, e.status, e.getMessage(), e, false); }
+        catch (AuthService.InvalidCredentials e) { status = errorResponse(exchange, 401, "authentication required", e, false); }
+        catch (IllegalArgumentException e) { status = errorResponse(exchange, 400, e.getMessage(), e, false); }
+        catch (RuntimeException e) { status = errorResponse(exchange, 500, "internal server error", e, true); }
+        finally { exchange.close(); long elapsed = (System.nanoTime() - started) / 1_000_000; if ((status >= 400 && status != 499) || elapsed > 1000) System.out.println(exchange.getRequestMethod() + " " + exchange.getRequestURI().getPath() + " status=" + status + " duration_ms=" + elapsed); }
+    }
+
+    private int errorResponse(HttpExchange exchange, int status, String message, RuntimeException error, boolean report) {
+        if (clientDisconnected(error)) return 499;
+        if (report) error.printStackTrace(System.err);
+        try { return sendError(exchange, status, message); }
+        catch (RuntimeException writeError) {
+            if (!clientDisconnected(writeError)) writeError.printStackTrace(System.err);
+            return clientDisconnected(writeError) ? 499 : status;
+        }
+    }
+
+    static boolean clientDisconnected(Throwable error) {
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (!(current instanceof IOException) || current.getMessage() == null) continue;
+            String message = current.getMessage().toLowerCase(Locale.ROOT);
+            if (message.contains("broken pipe")
+                    || message.contains("connection reset")
+                    || message.contains("connection aborted")
+                    || message.contains("socket closed")
+                    || message.contains("stream is closed")
+                    || message.contains("insufficient bytes written")) return true;
+        }
+        return false;
     }
 
     private int dispatch(HttpExchange exchange) {
@@ -124,7 +178,7 @@ public final class AdminServer implements AutoCloseable {
     private static String permission(String method, String path) {
         if (path.startsWith("/api/config/")) return path.endsWith("/draft") && method.equals("PUT") ? "config:edit" : path.endsWith("/active") || (path.endsWith("/draft") && method.equals("GET")) ? "config:view" : "config:publish";
         if (path.startsWith("/api/runtime") || path.equals("/api/monitoring")) {
-            if (path.endsWith("/pause")) return "runtime:stop"; if (path.endsWith("/emergency-cancel")) return "runtime:emergency_cancel"; if (path.endsWith("/resume") || path.endsWith("/reconcile")) return "runtime:start"; return "runtime:view";
+            if (path.endsWith("/pause")) return "runtime:stop"; if (path.endsWith("/emergency-cancel")) return "runtime:emergency_cancel"; if (path.endsWith("/resume") || path.endsWith("/reconcile") || path.endsWith("/rebuild-book")) return "runtime:start"; return "runtime:view";
         }
         if (path.startsWith("/api/oracle/")) return "config:edit";
         if (path.equals("/api/credential-options") || path.equals("/api/venue-types")) return "venue:view";
@@ -206,7 +260,7 @@ public final class AdminServer implements AutoCloseable {
         Map<String, RuntimeStore.PauseState> pauses = runtime.paused(); List<RuntimeStore.InstrumentSnapshot> snapshots = new ArrayList<>();
         for (AppConfig.InstrumentConfig instrument : config.instruments) if (session.canAccessInstrument(instrument.id)) {
             RuntimeStore.InstrumentSnapshot snapshot = runtime.get(instrument.id); if (snapshot == null) snapshot = waiting(config, instrument);
-            mergePause(snapshot, pauses.get(instrument.id)); redact(snapshot, session); snapshots.add(snapshot);
+            mergePause(snapshot, pauses.get(instrument.id)); mergeBookRebuild(snapshot, runtime.bookRebuildStatus(instrument.id)); redact(snapshot, session); snapshots.add(snapshot);
         }
         return new RuntimeData(config, engine, snapshots);
     }
@@ -215,13 +269,14 @@ public final class AdminServer implements AutoCloseable {
         String relative = path.substring("/api/runtime/".length()); String[] parts = relative.split("/"); String instrument = parts[0];
         if (!session.canAccessInstrument(instrument)) throw new ApiError(403, "instrument is outside your data scope");
         AppConfig config = runtimeConfig(); AppConfig.InstrumentConfig configured = config.instruments.stream().filter(item -> item.id.equals(instrument)).findFirst().orElseThrow(() -> new ApiError(404, "instrument is not in the runtime configuration"));
-        if (parts.length == 1 && method.equals("GET")) { RuntimeStore.InstrumentSnapshot value = runtime.get(instrument); if (value == null) value = waiting(config, configured); mergePause(value, runtime.paused().get(instrument)); redact(value, session); return send(exchange, 200, value); }
+        if (parts.length == 1 && method.equals("GET")) { RuntimeStore.InstrumentSnapshot value = runtime.get(instrument); if (value == null) value = waiting(config, configured); mergePause(value, runtime.paused().get(instrument)); mergeBookRebuild(value, runtime.bookRebuildStatus(instrument)); redact(value, session); return send(exchange, 200, value); }
         if (parts.length != 2 || !method.equals("POST")) throw new ApiError(404, "not found");
         return switch (parts[1]) {
             case "pause" -> { RuntimeStore.PauseState state = runtime.setPaused(instrument, RuntimeStore.REASON_MANUAL_PAUSE, session.userId); audit(session.userId,"runtime.pause","instrument",instrument,Map.of("reason",state.reason)); yield send(exchange,202,state); }
             case "emergency-cancel" -> { RuntimeStore.PauseState state = runtime.setPaused(instrument, RuntimeStore.REASON_EMERGENCY_CANCEL, session.userId); audit(session.userId,"runtime.emergency_cancel","instrument",instrument,Map.of("reason",state.reason)); yield send(exchange,202,state); }
             case "resume" -> { runtime.resume(instrument); audit(session.userId,"runtime.resume","instrument",instrument,Map.of()); yield send(exchange,202,Map.of("instrument_id",instrument,"paused",false)); }
             case "reconcile" -> { RuntimeStore.ReconcileRequest request = runtime.requestReconcile(instrument, session.userId); audit(session.userId,"runtime.reconcile","instrument",instrument,Map.of()); yield send(exchange,202,request); }
+            case "rebuild-book" -> { RuntimeStore.BookRebuildRequest request = runtime.requestBookRebuild(instrument, session.userId); audit(session.userId,"runtime.book_rebuild","instrument",instrument,Map.of()); yield send(exchange,202,request); }
             default -> throw new ApiError(404,"not found");
         };
     }
@@ -257,6 +312,7 @@ public final class AdminServer implements AutoCloseable {
     private static AppConfig mergeScoped(AppConfig existing,AppConfig incoming,AuthService.Session session){AppConfig result=copy(existing); Set<String> allowed=new LinkedHashSet<>(session.instruments); result.instruments.removeIf(item->allowed.contains(item.id)); incoming.instruments.stream().filter(item->allowed.contains(item.id)).forEach(result.instruments::add); result.venues.forEach((name,venue)->{venue.markets.entrySet().removeIf(entry->allowed.contains(entry.getKey())); AppConfig.VenueConfig in=incoming.venues.get(name); if(in!=null)in.markets.forEach((id,market)->{if(allowed.contains(id))venue.markets.put(id,market);});}); return result;}
     private static RuntimeStore.InstrumentSnapshot waiting(AppConfig config,AppConfig.InstrumentConfig instrument){RuntimeStore.InstrumentSnapshot value=new RuntimeStore.InstrumentSnapshot(); value.instrumentId=instrument.id;value.baseSymbol=instrument.base.symbol;value.quoteSymbol=instrument.quote.symbol;value.mode=config.mode;value.status="waiting";value.targetInventory=instrument.strategy.targetBase;value.maxBaseDeviation=instrument.strategy.maxBaseDeviation;return value;}
     private static void mergePause(RuntimeStore.InstrumentSnapshot snapshot,RuntimeStore.PauseState pause){if(pause!=null){snapshot.pause=pause;snapshot.status=snapshot.paused?"paused":"pausing";}else if(snapshot.paused){snapshot.pause=null;snapshot.status="resuming";}}
+    private static void mergeBookRebuild(RuntimeStore.InstrumentSnapshot snapshot,RuntimeStore.BookRebuildStatus status){snapshot.bookRebuild=status;}
     private static void redact(RuntimeStore.InstrumentSnapshot snapshot,AuthService.Session session){for(RuntimeStore.VenueSnapshot venue:snapshot.venues){if(!session.has("orders:view"))venue.openOrders=new ArrayList<>();if(!session.has("fills:view"))venue.fills=new ArrayList<>();}if(!session.has("fills:view")&&snapshot.tradeSimulation instanceof ObjectNode object)object.set("fills",Json.MAPPER.createArrayNode());}
     private static AppConfig copy(AppConfig value){return Json.read(Json.writeBytes(value),AppConfig.class);}
 

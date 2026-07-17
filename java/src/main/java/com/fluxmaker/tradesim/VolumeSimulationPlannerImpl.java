@@ -168,6 +168,9 @@ public final class VolumeSimulationPlannerImpl implements VolumeSimulationPlanne
 
         }
 
+
+
+
         return new EventPlan(
                 side,
                 price,

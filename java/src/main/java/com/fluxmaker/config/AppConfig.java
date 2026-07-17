@@ -109,7 +109,11 @@ public final class AppConfig {
         public int bestLevels;
         @JsonInclude(JsonInclude.Include.NON_DEFAULT)
         public int bestLevelRefreshSeconds;
+        /** Nullable wrapper keeps configurations created before this option
+         *  backward-compatible: missing/null means enabled. */
+        public Boolean startupBookRebuildEnabled = Boolean.TRUE;
         public boolean usesOrderNotionalRange() { return !minOrderNotional.isZero() || !maxOrderNotional.isZero(); }
+        public boolean effectiveStartupBookRebuildEnabled() { return !Boolean.FALSE.equals(startupBookRebuildEnabled); }
         public int effectiveQuoteRefreshSeconds() { return quoteRefreshSeconds > 0 ? quoteRefreshSeconds : DEFAULT_QUOTE_REFRESH_SECONDS; }
         public int effectiveQuoteRefreshRatioBps() { return quoteRefreshRatioBps > 0 ? quoteRefreshRatioBps : DEFAULT_QUOTE_REFRESH_RATIO_BPS; }
         public Duration effectiveMinOrderLifetime() { return Duration.ofSeconds(minOrderLifetimeSeconds > 0 ? minOrderLifetimeSeconds : DEFAULT_MIN_ORDER_LIFETIME_SECONDS); }

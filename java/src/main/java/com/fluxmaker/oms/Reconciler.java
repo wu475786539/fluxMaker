@@ -25,7 +25,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 public final class Reconciler {
     public static final String MANAGED_PREFIX = "fm-";
-    private static final int MAX_MUTATIONS = 20, MAX_BATCH_CANCEL = 20;
+    private static final int MAX_MUTATIONS = 20, MAX_BATCH_CANCEL = 20, STARTUP_SEED_ORDERS = 2;
     private static final Duration LOOKUP_DELAY = Duration.ofSeconds(2), CREATE_MAX_AGE = Duration.ofSeconds(30), CANCEL_RETRY_DELAY = Duration.ofSeconds(5);
     // After an uncertain submit/cancel (e.g. a request timeout) we block the market
     // so we don't blindly retry a batch that may have partially landed. Once this
@@ -113,6 +113,15 @@ public final class Reconciler {
                                                     int thresholdBps, List<Domain.Order> orders, WriteGuard guard,
                                                     long fenceGeneration, RefreshPolicy refresh,
                                                     boolean gradualMaterialReprice, ReplenishPolicy replenish) {
+        return reconcileWithOrders(client, instrumentId, quotes, thresholdBps, orders, guard, fenceGeneration,
+                refresh, gradualMaterialReprice, replenish, false);
+    }
+
+    public synchronized Result reconcileWithOrders(VenueClient client, String instrumentId, List<Domain.Quote> quotes,
+                                                    int thresholdBps, List<Domain.Order> orders, WriteGuard guard,
+                                                    long fenceGeneration, RefreshPolicy refresh,
+                                                    boolean gradualMaterialReprice, ReplenishPolicy replenish,
+                                                    boolean startupRebuild) {
         String key = stateKey(client, instrumentId); ensureLoaded(key);
         if (blocked.containsKey(key)) {
             Instant since = blockedAt.getOrDefault(key, Instant.EPOCH);
@@ -223,11 +232,22 @@ public final class Reconciler {
                 }
             }
             Map<Domain.Side, Integer> deficits = sideDeficits(quotes, managed, pending);
-            List<Domain.Quote> selected = selectReplenishments(
-                    key, quotes, matchedQuotes, deficits, Math.min(vacancies, MAX_MUTATIONS), replenish, clock.instant());
+            boolean seedStartupBook = startupRebuild && managed.isEmpty() && pending.isEmpty();
+            List<Domain.Quote> selected = seedStartupBook
+                    ? selectStartupSeeds(quotes, matchedQuotes, Math.min(vacancies, STARTUP_SEED_ORDERS))
+                    : selectReplenishments(
+                            key, quotes, matchedQuotes, deficits,
+                            Math.min(vacancies, MAX_MUTATIONS), replenish, clock.instant());
             result.delayed = delayedVacancies(key);
             if (selected.isEmpty()) { persist(key); return result; }
             placeMissing(client, key, instrumentId, selected, result, guard, fenceGeneration);
+            if (seedStartupBook) {
+                // A confirmed empty/incomplete venue book gets one best order per
+                // side immediately. All deeper levels then use the configured
+                // delayed, bounded replenishment path instead of a large burst.
+                replenishmentBootstrap.remove(key);
+                replenishmentInitialized.add(key);
+            }
             consumeReplenishments(key, selected);
             result.delayed = delayedVacancies(key);
             persist(key);
@@ -320,6 +340,17 @@ public final class Reconciler {
             if (matched[index] || used.getOrDefault(quote.side, 0) >= allowed.getOrDefault(quote.side, 0)) continue;
             selected.add(quote);
             used.merge(quote.side, 1, Integer::sum);
+        }
+        return selected;
+    }
+
+    private static List<Domain.Quote> selectStartupSeeds(List<Domain.Quote> quotes, boolean[] matched, int limit) {
+        List<Domain.Quote> selected = new ArrayList<>();
+        Set<Domain.Side> sides = new LinkedHashSet<>();
+        for (int index = 0; index < quotes.size() && selected.size() < limit; index++) {
+            Domain.Quote quote = quotes.get(index);
+            if (matched[index] || !sides.add(quote.side)) continue;
+            selected.add(quote);
         }
         return selected;
     }

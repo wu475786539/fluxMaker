@@ -89,6 +89,9 @@ test("strategy page renders progressive quote refresh controls and defaults", ()
   assert.match(html, /data-path="instruments\.0\.strategy\.fill_replenish_min_delay_seconds"[^>]*value="3"/);
   assert.match(html, /data-path="instruments\.0\.strategy\.fill_replenish_max_delay_seconds"[^>]*value="8"/);
   assert.match(html, /成交缺口延迟补单/);
+  assert.match(html, /盘口启动重建/);
+  assert.match(html, /data-path="instruments\.0\.strategy\.startup_book_rebuild_enabled"[^>]*checked/);
+  assert.match(html, /首轮只提交买一、卖一各 1 笔/);
   assert.match(html, /data-path="instruments\.0\.strategy\.price_jitter_ticks"[^>]*value="2"/);
   assert.match(html, /data-path="instruments\.0\.strategy\.best_levels"[^>]*value="3"/);
   assert.match(html, /data-path="instruments\.0\.strategy\.best_level_refresh_seconds"[^>]*value="90"/);
@@ -150,13 +153,45 @@ test("volume simulation page is explicitly internal-only and renders extension c
   assert.doesNotMatch(html, /测试网真实下单/);
 });
 
-test("runtime book labels distinguish empty and one-sided maker bootstrap", () => {
+test("runtime book labels distinguish rebuildable books from an unavailable API", () => {
   assert.deepEqual(
     JSON.parse(JSON.stringify(context.bookDisplayState({ bid_price: "0", ask_price: "0" }))),
-    { hasBid: false, hasAsk: false, twoSided: false, label: "空盘口 · 按指数价铺单" },
+    { hasBid: false, hasAsk: false, twoSided: false, label: "空盘口 · 等待启动重建" },
   );
-  assert.equal(context.bookDisplayState({ bid_price: "1", ask_price: "0" }).label, "单边盘口 · 按指数价补单");
-  assert.equal(context.bookDisplayState(null).label, "盘口接口不可用 · 按指数价铺单");
+  assert.equal(context.bookDisplayState({ bid_price: "1", ask_price: "0" }).label, "单边盘口 · 等待启动重建");
+  assert.equal(context.bookDisplayState(null).label, "盘口接口不可用 · 停止写入");
+});
+
+test("live runtime page exposes one-shot book rebuild and its result", () => {
+  vm.runInContext(`
+    state.user = { permissions: ["runtime:view", "runtime:start", "orders:view", "fills:view"] };
+    state.runtime = { instruments: [{
+      instrument_id: "gdt_usdt",
+      base_symbol: "GDT",
+      quote_symbol: "USDT",
+      mode: "live",
+      status: "degraded",
+      paused: false,
+      venues: [],
+      book_rebuild: {
+        status: "failed",
+        message: "余额预算不足",
+        placed: 0,
+        completed_at: "2026-07-17T00:00:00Z"
+      }
+    }] };
+  `, context);
+  const html = context.runtimeTab({
+    id: "gdt_usdt",
+    base: { symbol: "GDT" },
+    quote: { symbol: "USDT" },
+    strategy: { target_base: "0", max_base_deviation: "100" },
+  });
+
+  assert.match(html, /data-runtime-action="rebuild-book"/);
+  assert.match(html, /启动盘口重建/);
+  assert.match(html, /盘口重建失败/);
+  assert.match(html, /余额预算不足/);
 });
 
 function order(id, side, price) {

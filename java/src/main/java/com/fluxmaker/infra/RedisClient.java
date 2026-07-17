@@ -23,19 +23,32 @@ public final class RedisClient implements AutoCloseable {
     private final int timeoutMs;
 
     public RedisClient(String address, String password, int database) {
+        this(address, password, database, 10_000);
+    }
+
+    public RedisClient(String address, String password, int database, int timeoutMs) {
         if (address == null || address.isBlank()) throw new IllegalArgumentException("REDIS_ADDR is required");
+        if (timeoutMs < 100 || timeoutMs > 300_000) throw new IllegalArgumentException("REDIS_TIMEOUT_MS must be between 100 and 300000");
         int separator = address.lastIndexOf(':');
         this.host = separator < 0 ? address : address.substring(0, separator);
         this.port = separator < 0 ? 6379 : Integer.parseInt(address.substring(separator + 1));
         this.password = password == null ? "" : password;
         this.database = database;
-        this.timeoutMs = 10_000;
+        this.timeoutMs = timeoutMs;
     }
 
     public static RedisClient fromEnv() {
         String rawDb = System.getenv().getOrDefault("REDIS_DB", "0");
-        return new RedisClient(System.getenv("REDIS_ADDR"), System.getenv("REDIS_PASSWORD"), Integer.parseInt(rawDb));
+        String rawTimeout = System.getenv().getOrDefault("REDIS_TIMEOUT_MS", "10000");
+        try {
+            return new RedisClient(System.getenv("REDIS_ADDR"), System.getenv("REDIS_PASSWORD"),
+                    Integer.parseInt(rawDb), Integer.parseInt(rawTimeout));
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("REDIS_DB and REDIS_TIMEOUT_MS must be integers", e);
+        }
     }
+
+    int timeoutMs() { return timeoutMs; }
 
     public void ping() { command("PING"); }
 

@@ -25,7 +25,7 @@ public final class AppRuntime {
 
     public void applyCleanup(ConfigDiff.Plan plan) {
         if (plan == null) return;
-        if (plan.cancelAll) { engine.shutdown(); return; }
+        if (plan.cancelAll) { engine.cancelAll(); return; }
         List<String> failures = new ArrayList<>();
         for (ConfigDiff.MarketTarget target : plan.cancelTargets) {
             try { engine.cancelMarket(target.instrumentId, target.venue); }

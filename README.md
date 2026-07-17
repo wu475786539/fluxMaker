@@ -153,7 +153,8 @@ http://服务器地址:8080
 - 每个交易市场可配置最大 Base 和 Quote 资金占用，`0` 表示不额外限制；该硬上限与余额预留、交易所订单上限共同裁剪外层档位。
 - 每个 `币对 × 交易所` 独立维护 `normal → degraded → canceling → paused → recovering → normal` 故障状态。异常状态持久保存到 Redis，配置热切换或进程重启后继承失败计数、撤单和恢复阶段；确认恢复为 normal 后才删除。普通超时先保留安全期内的原订单；达到连续失败阈值、价格过期或价格保护失败后才定向撤单。
 - “运行与 RPC”可配置连续失败次数、连续恢复次数和故障安全宽限。后台运行监控展示故障阶段、失败/恢复计数及订单是否仍被保留。
-- “对账并解除阻断”会安全撤销对应币对的受管订单、清理持久化 OMS 阻断状态并重新进入恢复观察，不需要重启整个引擎。
+- “对账并解除阻断”会先查询交易所当前挂单，再清理持久化 OMS 阻断状态；不会撤销现有订单，也不需要重启整个引擎。
+- 实盘“运行状态”页提供一次性的“启动盘口重建”按钮。它在最新链上参考价附近用 Post-Only 补齐买一、卖一首档，不撤现有订单；异常盘口中间价/点差和日常库存单边抑制只在这次人工恢复中不作为首档依据，真实余额仍决定双边首档是否可承担，参考价有效期、精度、最小金额、挂单上限和租约围栏也必须通过。冷启动时即使所有币对都被预检阻断，引擎也会以禁止自动写入的降级模式运行控制循环，确保该按钮可以执行。
 - Watchdog 同时检查独立进程心跳和交易循环进度。进程仍在线但超过 `交易循环卡死超时` 没有任何币对完成一次循环时，也会执行安全撤单。
 - 交易轮次使用有界 Worker Pool 并行处理币对，默认最大并发数为 4，可在“运行与 RPC”调整为 1–32。同一交易凭证绑定的多个币对会自动使用账户锁串行执行，避免共享余额并发超配；不同账户和无凭证的 Shadow 币对可以并行。
 - BNB Chain 最新区块读取会在 500ms 窗口内合并复用，同一轮多个币对不再重复请求 `eth_getBlockByNumber`；Pair 储备仍按各币对独立读取。
@@ -348,35 +349,6 @@ docker-compose up -d --build
 docker-compose logs -f --tail=500 fluxmaker
 /opt/fluxmaker/current
 ./deploy.sh root@168.144.132.3
+ssh root@168.144.132.3 
 
-
-API_KEY='19af818fe5ff8eb5ffbcabbc096126251a09a45798f1a662870414a3e074d5b3'
-SECRET='8ec55e104f4450f3cc586e5f5f7018080df1dd8f7691bf95aa87a549ea3f4250'
-ORDERS='[{"symbol":"GDT_USDT","direction":"BUY","tradeType":"LIMIT","totalAmount":"1","price":"0.30"}]'
-
-TS=$(date +%s%3N)
-NONCE=$(openssl rand -hex 16)
-PAYLOAD="ordersJsonStr=${ORDERS}&timestamp=${TS}"
-SIG=$(printf '%s' "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $NF}')
-
-curl -sS -w '\nHTTP=%{http_code} total=%{time_total}\n' --max-time 20 -G \
-  -X POST 'https://open.mgbx.com/spot/v1/u/trade/order/batch/create' \
-  -H 'Content-Type: application/x-www-form-urlencoded' \
-  -H "X-Access-Key: ${API_KEY}" \
-  -H "X-Signature: ${SIG}" \
-  -H "X-Request-Timestamp: ${TS}" \
-  -H "X-Request-Nonce: ${NONCE}" \
-  --data-urlencode "ordersJsonStr=${ORDERS}"
-
-API_KEY='19af818fe5ff8eb5ffbcabbc096126251a09a45798f1a662870414a3e074d5b3'
-SECRET='8ec55e104f4450f3cc586e5f5f7018080df1dd8f7691bf95aa87a549ea3f4250'
-
-ORDERS='[{"symbol":"GDT_USDT","direction":"BUY","tradeType":"LIMIT","totalAmount":"0","price":"0.30"}]'
-TS=$(date +%s%3N); NONCE=$(openssl rand -hex 16)
-SIG=$(printf '%s' "ordersJsonStr=${ORDERS}&timestamp=${TS}" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $NF}')
-# 去掉 -G,参数进 body
-curl -sS -w '\ncode=%{http_code} t=%{time_total}\n' --max-time 20 -X POST \
-  'https://open.mgbx.com/spot/v1/u/trade/order/batch/create' \
-  -H 'Content-Type: application/x-www-form-urlencoded' \
-  -H "X-Access-Key: ${API_KEY}" -H "X-Signature: ${SIG}" -H "X-Request-Timestamp: ${TS}" -H "X-Request-Nonce: ${NONCE}" \
-  --data-urlencode "ordersJsonStr=${ORDERS}"
+./scripts/rebuild-local.sh

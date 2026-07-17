@@ -11,12 +11,15 @@ import com.fluxmaker.runtime.RuntimeStore;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
 
 public final class AdminApiMain {
     private AdminApiMain() {}
 
     public static void main(String[] args) {
+        TimestampedStreams.install();
         try { run(); }
         catch (RuntimeException e) { System.err.println("admin api stopped: " + EngineMain.rootMessage(e)); e.printStackTrace(System.err); System.exit(1); }
     }
@@ -33,7 +36,21 @@ public final class AdminApiMain {
                 CountDownLatch stop = new CountDownLatch(1);
                 Runtime.getRuntime().addShutdownHook(new Thread(stop::countDown, "shutdown"));
                 server.start(); System.out.println("admin api listening on port " + server.port());
-                try { stop.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                AtomicReference<String> terminalFailure = new AtomicReference<>();
+                try (AdminLivenessMonitor monitor = AdminLivenessMonitor.loopback(
+                        server.port(),
+                        Duration.ofSeconds(nonNegativeEnv("ADMIN_SELF_CHECK_STARTUP_GRACE_SECONDS", 30)),
+                        Duration.ofSeconds(positiveEnv("ADMIN_SELF_CHECK_INTERVAL_SECONDS", 15)),
+                        Duration.ofSeconds(positiveEnv("ADMIN_SELF_CHECK_TIMEOUT_SECONDS", 2)),
+                        positiveEnv("ADMIN_SELF_CHECK_FAILURES", 3),
+                        () -> {
+                            terminalFailure.compareAndSet(null, "admin HTTP liveness failed repeatedly");
+                            stop.countDown();
+                        })) {
+                    monitor.start();
+                    try { stop.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                }
+                if (terminalFailure.get() != null) throw new IllegalStateException(terminalFailure.get());
             }
         }
     }
@@ -51,4 +68,20 @@ public final class AdminApiMain {
         throw new IllegalStateException("admin web directory not found");
     }
     private static String env(String key, String fallback) { String value = System.getenv(key); return value == null || value.isBlank() ? fallback : value; }
+    private static int positiveEnv(String key, int fallback) {
+        int value = integerEnv(key, fallback);
+        if (value <= 0) throw new IllegalArgumentException(key + " must be positive");
+        return value;
+    }
+    private static int nonNegativeEnv(String key, int fallback) {
+        int value = integerEnv(key, fallback);
+        if (value < 0) throw new IllegalArgumentException(key + " must not be negative");
+        return value;
+    }
+    private static int integerEnv(String key, int fallback) {
+        String value = System.getenv(key);
+        if (value == null || value.isBlank()) return fallback;
+        try { return Integer.parseInt(value.trim()); }
+        catch (NumberFormatException e) { throw new IllegalArgumentException(key + " must be an integer", e); }
+    }
 }

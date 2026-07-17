@@ -85,8 +85,68 @@ public final class MgbxClient implements VenueClient {
             if (apiKey.isEmpty() || secret.isEmpty()) throw new IllegalStateException("MGBX credentials are not configured"); String timestamp = Long.toString(System.currentTimeMillis()); byte[] nonce = new byte[16]; RANDOM.nextBytes(nonce); builder.header("X-Access-Key", apiKey).header("X-Signature", HttpSupport.hmacSha256(secret, signaturePayload(values, timestamp))).header("X-Request-Timestamp", timestamp).header("X-Request-Nonce", HexFormat.of().formatHex(nonce));
         }
         String query = HttpSupport.encode(values); builder.uri(URI.create(baseUrl + path + (query.isEmpty() ? "" : "?" + query))).timeout(timeout).header("Content-Type", "application/x-www-form-urlencoded").method(method, HttpRequest.BodyPublishers.noBody());
-        try { HttpResponse<String> response = http.send(builder.build(), HttpResponse.BodyHandlers.ofString()); if (response.statusCode() / 100 != 2) throw new IllegalStateException("MGBX http " + response.statusCode() + ": " + response.body()); JsonNode envelope = HttpSupport.json(response.body()); int code = envelope.path("code").asInt(); if (code != 0) { String message = envelope.path("msg").asText(); if (message.isEmpty()) message = envelope.path("message").asText(); throw new IllegalStateException("MGBX code " + code + ": " + message); } return envelope.path("data"); }
-        catch (IOException e) { throw new IllegalStateException("MGBX request: " + e.getMessage(), e); } catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new IllegalStateException("MGBX request interrupted", e); }
+        long started = System.nanoTime();
+        try {
+            HttpResponse<String> response = http.send(builder.build(), HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() / 100 != 2) throw new IllegalStateException(
+                    "MGBX HTTP error method=" + method + " path=" + path
+                            + " status=" + response.statusCode() + " body=" + oneLine(response.body()));
+            JsonNode envelope = HttpSupport.json(response.body());
+            int code = envelope.path("code").asInt();
+            if (code != 0) {
+                String message = envelope.path("msg").asText();
+                if (message.isEmpty()) message = envelope.path("message").asText();
+                throw new IllegalStateException(
+                        "MGBX API error method=" + method + " path=" + path
+                                + " code=" + code + " message=" + oneLine(message));
+            }
+            return envelope.path("data");
+        } catch (IOException e) {
+            throw transportFailure(method, path, started, e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw transportFailure(method, path, started, e);
+        }
+    }
+
+    private IllegalStateException transportFailure(String method, String path, long startedNanos, Throwable error) {
+        long elapsedMillis = Math.max(0, (System.nanoTime() - startedNanos) / 1_000_000L);
+        String diagnostic = transportFailureMessage(name, method, path, elapsedMillis, timeout, error);
+        // Keep this as one structured line: the engine currently logs exception messages,
+        // not stack traces. The original throwable is still retained as the cause.
+        System.err.println("[mgbx-http] " + diagnostic);
+        return new IllegalStateException(diagnostic, error);
+    }
+
+    static String transportFailureMessage(String venue, String method, String path,
+                                          long elapsedMillis, Duration timeout, Throwable error) {
+        return "MGBX transport failure venue=" + oneLine(venue)
+                + " method=" + oneLine(method)
+                + " path=" + oneLine(path)
+                + " elapsed_ms=" + Math.max(0, elapsedMillis)
+                + " timeout_ms=" + Math.max(0, timeout.toMillis())
+                + " exception=" + error.getClass().getName()
+                + " cause_chain=" + causeChain(error);
+    }
+
+    private static String causeChain(Throwable error) {
+        StringBuilder result = new StringBuilder();
+        Throwable current = error;
+        for (int depth = 0; current != null && depth < 8; depth++) {
+            if (depth > 0) result.append(" <- ");
+            result.append(current.getClass().getName());
+            String message = current.getMessage();
+            if (message != null && !message.isBlank()) result.append('(').append(oneLine(message)).append(')');
+            Throwable next = current.getCause();
+            if (next == current) break;
+            current = next;
+        }
+        return result.toString();
+    }
+
+    private static String oneLine(String value) {
+        String normalized = value == null ? "" : value.replace('\r', ' ').replace('\n', ' ').replace('\t', ' ').trim();
+        return normalized.length() <= 1_000 ? normalized : normalized.substring(0, 1_000) + "...";
     }
 
     static String signaturePayload(Map<String, List<String>> values, String timestamp) { return HttpSupport.rawSorted(values) + "&timestamp=" + timestamp; }

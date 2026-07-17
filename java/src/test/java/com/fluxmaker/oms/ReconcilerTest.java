@@ -14,6 +14,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ReconcilerTest {
@@ -134,6 +135,28 @@ class ReconcilerTest {
         assertEquals(5, venue.orders.stream().filter(order -> order.side == Domain.Side.SELL).count());
     }
 
+    @Test void replacementSubmitTimeoutDoesNotCancelTheRemainingBook() {
+        List<Domain.Quote> quotes = target(2, 0);
+        List<Domain.Order> orders = ordersFor(quotes, null, Instant.now().minusSeconds(60));
+        orders.removeFirst();
+        FakeVenue venue = new FakeVenue(orders);
+        venue.failPlaces = true;
+        Reconciler reconciler = new Reconciler(null);
+        Reconciler.ReplenishPolicy immediate = new Reconciler.ReplenishPolicy(
+                Duration.ZERO, Duration.ZERO, 2);
+
+        assertThrows(IllegalStateException.class, () -> reconciler.reconcileWithOrders(
+                venue, "token_usdt", quotes, 10, venue.openOrders("TOKENUSDT"), null, 0,
+                Reconciler.RefreshPolicy.disabled(), true, immediate));
+
+        assertEquals(3, venue.orders.size(), "the three unaffected resting orders must remain live");
+        assertEquals(0, venue.cancelCalls, "an uncertain replacement must freeze writes, not clear the book");
+
+        reconciler.clearBlocked(venue, "token_usdt");
+        assertEquals(3, venue.orders.size(), "manual reconciliation must clear the block without canceling orders");
+        assertEquals(0, venue.cancelCalls);
+    }
+
     @Test void initialEmptyBookStillBootstrapsImmediately() {
         List<Domain.Quote> quotes = target(2, 0);
         FakeVenue venue = new FakeVenue(List.of());
@@ -146,6 +169,36 @@ class ReconcilerTest {
                 Reconciler.RefreshPolicy.disabled(), true, replenish);
 
         assertEquals(4, result.placed);
+        assertEquals(4, venue.orders.size());
+    }
+
+    @Test void startupBookRebuildSeedsTwoBestOrdersThenReplenishesGradually() {
+        List<Domain.Quote> quotes = target(5, 0);
+        FakeVenue venue = new FakeVenue(List.of());
+        MutableClock clock = new MutableClock(Instant.parse("2026-07-16T10:00:00Z"));
+        Reconciler reconciler = new Reconciler(null, clock);
+        Reconciler.ReplenishPolicy replenish = new Reconciler.ReplenishPolicy(
+                Duration.ofSeconds(3), Duration.ofSeconds(3), 2);
+
+        Reconciler.Result seeded = reconciler.reconcileWithOrders(
+                venue, "token_usdt", quotes, 10, List.of(), null, 0,
+                Reconciler.RefreshPolicy.disabled(), true, replenish, true);
+
+        assertEquals(2, seeded.placed, "startup rebuild must avoid submitting the complete depth in one burst");
+        assertEquals(1, venue.orders.stream().filter(order -> order.side == Domain.Side.BUY).count());
+        assertEquals(1, venue.orders.stream().filter(order -> order.side == Domain.Side.SELL).count());
+
+        Reconciler.Result waiting = reconciler.reconcileWithOrders(
+                venue, "token_usdt", quotes, 10, venue.openOrders("TOKENUSDT"), null, 0,
+                Reconciler.RefreshPolicy.disabled(), true, replenish, false);
+        assertEquals(0, waiting.placed);
+        assertEquals(8, waiting.delayed);
+
+        clock.advance(Duration.ofSeconds(3));
+        Reconciler.Result next = reconciler.reconcileWithOrders(
+                venue, "token_usdt", quotes, 10, venue.openOrders("TOKENUSDT"), null, 0,
+                Reconciler.RefreshPolicy.disabled(), true, replenish, false);
+        assertEquals(2, next.placed, "deeper levels must obey the normal per-cycle replenishment limit");
         assertEquals(4, venue.orders.size());
     }
 
@@ -251,18 +304,21 @@ class ReconcilerTest {
     private static final class FakeVenue implements VenueClient {
         private final List<Domain.Order> orders;
         private int nextOrderId = 1000;
+        private int cancelCalls;
+        private boolean failPlaces;
         private FakeVenue(List<Domain.Order> orders) { this.orders = new ArrayList<>(orders); }
         @Override public String name() { return "fake"; }
         @Override public Domain.Book topBook(String symbol) { return new Domain.Book(); }
         @Override public List<Domain.Balance> balances() { return List.of(); }
         @Override public List<Domain.Order> openOrders(String symbol) { return new ArrayList<>(orders); }
         @Override public Domain.Order placePostOnly(PlaceRequest request) {
+            if (failPlaces) throw new IllegalStateException("submit timed out");
             Domain.Order order = new Domain.Order();
             order.orderId = Integer.toString(nextOrderId++); order.clientId = request.clientId(); order.symbol = request.symbol();
             order.side = request.side(); order.price = request.price(); order.quantity = request.quantity();
             order.state = Domain.OrderState.NEW; order.createdAt = Instant.now(); orders.add(order); return order;
         }
-        @Override public void cancelOrder(String symbol, String orderId) { orders.removeIf(order -> order.orderId.equals(orderId)); }
+        @Override public void cancelOrder(String symbol, String orderId) { cancelCalls++; orders.removeIf(order -> order.orderId.equals(orderId)); }
     }
 
     private static final class MutableClock extends Clock {

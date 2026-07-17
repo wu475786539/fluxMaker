@@ -1,4 +1,4 @@
 #!/bin/sh
-printf 'watchdog starting: code_build=%s commit=%s built_at=%s\n' \
-  "${FLUXMAKER_BUILD_ID:-unknown}" "${FLUXMAKER_BUILD_COMMIT:-unknown}" "${FLUXMAKER_BUILD_TIME:-unknown}"
+printf '%s watchdog starting: code_build=%s commit=%s built_at=%s\n' \
+  "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "${FLUXMAKER_BUILD_ID:-unknown}" "${FLUXMAKER_BUILD_COMMIT:-unknown}" "${FLUXMAKER_BUILD_TIME:-unknown}"
 exec java ${JAVA_OPTS:-} -cp '/app/fluxmaker-java.jar:/app/lib/*' com.fluxmaker.app.WatchdogMain "$@"

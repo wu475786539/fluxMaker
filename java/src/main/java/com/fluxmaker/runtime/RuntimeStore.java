@@ -21,6 +21,8 @@ public final class RuntimeStore {
     public static final String APPLIED_VERSION_KEY = "fluxmaker:runtime:applied-version";
     public static final String PAUSED_KEY = "fluxmaker:control:paused";
     public static final String RECONCILE_KEY = "fluxmaker:control:reconcile";
+    public static final String BOOK_REBUILD_KEY = "fluxmaker:control:book-rebuild";
+    public static final String BOOK_REBUILD_STATUS_KEY = "fluxmaker:runtime:book-rebuild-status";
     public static final String TRADING_PROGRESS_KEY = "fluxmaker:runtime:trading-progress";
     public static final String CYCLE_PERFORMANCE_KEY = "fluxmaker:runtime:cycle-performance";
     public static final String METRICS_KEY = "fluxmaker:runtime:metrics";
@@ -112,6 +114,22 @@ public final class RuntimeStore {
         public Instant requestedAt;
     }
 
+    public static final class BookRebuildRequest {
+        public String instrumentId;
+        public long requestedBy;
+        public Instant requestedAt;
+    }
+
+    public static final class BookRebuildStatus {
+        public String instrumentId;
+        public String status;
+        public String message;
+        public int placed;
+        public long requestedBy;
+        public Instant requestedAt;
+        public Instant completedAt;
+    }
+
     public static final class VenueSnapshot {
         public String name;
         public String type;
@@ -151,6 +169,7 @@ public final class RuntimeStore {
         public DecimalValue maxBaseDeviation = DecimalValue.ZERO;
         public List<VenueSnapshot> venues = new ArrayList<>();
         public JsonNode tradeSimulation;
+        public BookRebuildStatus bookRebuild;
         public String error;
         public Instant updatedAt;
         public long tickDurationMs;
@@ -276,6 +295,31 @@ public final class RuntimeStore {
 
     public Map<String, ReconcileRequest> reconciles() { return decodeHash(RECONCILE_KEY, ReconcileRequest.class); }
     public void clearReconcile(String instrumentId) { redis.hdel(RECONCILE_KEY, instrumentId); }
+
+    public BookRebuildRequest requestBookRebuild(String instrumentId, long userId) {
+        if (instrumentId == null || instrumentId.isEmpty()) throw new IllegalArgumentException("instrument id is required");
+        BookRebuildRequest request = new BookRebuildRequest();
+        request.instrumentId = instrumentId; request.requestedBy = userId; request.requestedAt = Instant.now();
+        // Publish pending before making the command visible, otherwise a very fast
+        // engine could finish and have its success overwritten by a late pending write.
+        reportBookRebuild(request, "pending", "等待引擎执行盘口重建", 0);
+        redis.hset(BOOK_REBUILD_KEY, instrumentId, Json.writeBytes(request));
+        return request;
+    }
+
+    public Map<String, BookRebuildRequest> bookRebuilds() { return decodeHash(BOOK_REBUILD_KEY, BookRebuildRequest.class); }
+    public void clearBookRebuild(String instrumentId) { redis.hdel(BOOK_REBUILD_KEY, instrumentId); }
+    public BookRebuildStatus bookRebuildStatus(String instrumentId) { return decodeHash(BOOK_REBUILD_STATUS_KEY, BookRebuildStatus.class).get(instrumentId); }
+
+    public BookRebuildStatus reportBookRebuild(BookRebuildRequest request, String status, String message, int placed) {
+        BookRebuildStatus result = new BookRebuildStatus();
+        result.instrumentId = request.instrumentId; result.status = status; result.message = message; result.placed = placed;
+        result.requestedBy = request.requestedBy; result.requestedAt = request.requestedAt;
+        if (!"pending".equals(status)) result.completedAt = Instant.now();
+        redis.hset(BOOK_REBUILD_STATUS_KEY, request.instrumentId, Json.writeBytes(result));
+        return result;
+    }
+
     public Map<String, PauseState> paused() { return decodeHash(PAUSED_KEY, PauseState.class); }
 
     private <T> T decode(String key, Class<T> type) {
